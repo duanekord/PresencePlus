@@ -14,6 +14,7 @@ public sealed class GraphWorker(
     private sealed record Subscription(string Id, DateTimeOffset Expires);
     private readonly Dictionary<string, Subscription> subscriptions = [];
     private string? userId;
+    private bool previousSubscriptionsRemoved;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -29,7 +30,11 @@ public sealed class GraphWorker(
                 {
                     using var me = await GetAsync(client, "me?$select=id", stoppingToken);
                     userId = Guid.Parse(me.RootElement.GetProperty("id").GetString()!).ToString();
+                }
+                if (!previousSubscriptionsRemoved)
+                {
                     await RemovePreviousSubscriptionsAsync(client, stoppingToken);
+                    previousSubscriptionsRemoved = true;
                 }
                 var renewed = await EnsureSubscriptionsAsync(client, stoppingToken);
                 dirty |= notifications.TakeSignal() || renewed || DateTimeOffset.UtcNow >= reconcileAt;

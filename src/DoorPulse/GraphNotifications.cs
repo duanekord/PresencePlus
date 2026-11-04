@@ -29,12 +29,14 @@ public sealed class GraphNotifications
         try
         {
             using var document = await JsonDocument.ParseAsync(request.Body, cancellationToken: request.HttpContext.RequestAborted);
-            if (!document.RootElement.TryGetProperty("value", out var items) || items.ValueKind != JsonValueKind.Array)
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty("value", out var items) || items.ValueKind != JsonValueKind.Array)
                 return Results.BadRequest();
             var accepted = false;
             foreach (var item in items.EnumerateArray())
             {
-                if (!item.TryGetProperty("subscriptionId", out var id) || id.ValueKind != JsonValueKind.String ||
+                if (item.ValueKind != JsonValueKind.Object ||
+                    !item.TryGetProperty("subscriptionId", out var id) || id.ValueKind != JsonValueKind.String ||
                     !item.TryGetProperty("clientState", out var secret) || secret.ValueKind != JsonValueKind.String ||
                     !notifications.Accept(id.GetString()!, secret.GetString()!))
                     return Results.Unauthorized();

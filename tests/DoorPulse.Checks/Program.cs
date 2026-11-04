@@ -3,6 +3,7 @@ using System.Text.Json;
 using DoorPulse;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
+using Microsoft.Extensions.Configuration;
 
 var checks = 0;
 void Equal<T>(T expected, T actual, string name)
@@ -73,6 +74,8 @@ Equal("hello+world", validation.ResponseContent, "validation token decoded once"
 Equal("text/plain", validation.ContentType, "validation content type");
 Equal(true, await Receive("{") is BadRequest, "malformed JSON");
 Equal(true, await Receive("{}") is BadRequest, "missing array");
+Equal(true, await Receive("[]") is BadRequest, "invalid root");
+Equal(true, await Receive("""{"value":[null]}""") is UnauthorizedHttpResult, "invalid item");
 Equal(true, await Receive("""{"value":[{"subscriptionId":"subscription","clientState":"wrong"}]}""") is UnauthorizedHttpResult, "reject forged webhook");
 Equal(false, notifications.TakeSignal(), "forged webhook not queued");
 Equal(true, await Receive("""{"value":[{"subscriptionId":"subscription","clientState":"expected-state"}]}""") is Accepted, "accept webhook");
@@ -84,4 +87,33 @@ Equal(false, notifications.TakeSignal(), "duplicate coalesced");
 notifications.Remove("subscription");
 Equal(false, notifications.Accept("subscription", "expected-state"), "removed subscription");
 
+var handler = new DeviceHandler();
+using var client = new HttpClient(handler);
+var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+{
+    ["Led:Url"] = "https://device.test/led"
+}).Build();
+await new WifiLed(client, configuration).SetAsync(new("Available", "#00FF00"), CancellationToken.None);
+Equal(HttpMethod.Put, handler.Method, "device HTTP method");
+Equal("https://device.test/led", handler.Url, "device URL");
+using var payload = JsonDocument.Parse(handler.Body!);
+Equal("Available", payload.RootElement.GetProperty("status").GetString(), "device status");
+Equal("#00FF00", payload.RootElement.GetProperty("color").GetString(), "device color");
+Equal("solid", payload.RootElement.GetProperty("effect").GetString(), "device effect");
+
 Console.WriteLine($"All {checks} DoorPulse checks passed.");
+
+sealed class DeviceHandler : HttpMessageHandler
+{
+    public HttpMethod? Method { get; private set; }
+    public string? Url { get; private set; }
+    public string? Body { get; private set; }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Method = request.Method;
+        Url = request.RequestUri!.ToString();
+        Body = await request.Content!.ReadAsStringAsync(cancellationToken);
+        return new HttpResponseMessage(System.Net.HttpStatusCode.OK);
+    }
+}
