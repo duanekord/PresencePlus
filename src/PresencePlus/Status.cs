@@ -1,4 +1,4 @@
-namespace DoorPulse;
+namespace PresencePlus;
 
 public sealed record Presence(string Availability, string Activity);
 public sealed record Meeting(DateTimeOffset Start, DateTimeOffset End);

@@ -5,7 +5,7 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
 
-namespace DoorPulse;
+namespace PresencePlus;
 
 public sealed class GraphWorker(
     IHttpClientFactory clients, GraphTokenProvider tokens, GraphNotifications notifications,
@@ -15,6 +15,7 @@ public sealed class GraphWorker(
     private readonly Dictionary<string, Subscription> subscriptions = [];
     private string? userId;
     private bool previousSubscriptionsRemoved;
+    private int signInVersion;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -26,10 +27,15 @@ public sealed class GraphWorker(
             {
                 var client = clients.CreateClient("graph");
                 client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", await tokens.GetAsync(stoppingToken));
-                if (userId is null)
+                if (userId is null || signInVersion != tokens.SignInVersion)
                 {
                     using var me = await GetAsync(client, "me?$select=id", stoppingToken);
                     userId = Guid.Parse(me.RootElement.GetProperty("id").GetString()!).ToString();
+                    signInVersion = tokens.SignInVersion;
+                    foreach (var subscription in subscriptions.Values) notifications.Remove(subscription.Id);
+                    subscriptions.Clear();
+                    previousSubscriptionsRemoved = false;
+                    state.Update(new("Unknown", "Unknown"), []);
                 }
                 if (!previousSubscriptionsRemoved)
                 {

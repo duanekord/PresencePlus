@@ -1,4 +1,4 @@
-# DoorPulse
+# PresencePlus
 
 A lightweight .NET 10 service that translates Microsoft Teams presence and Outlook
 calendar events into an office-door LED. Run a console simulation first, then
@@ -10,7 +10,7 @@ No external NuGet packages are required.
 Install the .NET 10 SDK, then from the repository root:
 
 ```sh
-dotnet run --project src/DoorPulse --no-launch-profile -- --Demo=true --urls=http://127.0.0.1:5080
+dotnet run --project src/PresencePlus --no-launch-profile -- --Demo=true --urls=http://127.0.0.1:5080
 ```
 
 The console logs LED changes; `GET http://127.0.0.1:5080/` returns the current LED
@@ -20,8 +20,8 @@ meeting, then returns to available. Omit `--Demo=true` for an unknown/gray idle
 simulation. Demo and Graph modes cannot run together.
 
 ```sh
-dotnet build src/DoorPulse
-dotnet run --project tests/DoorPulse.Checks
+dotnet build src/PresencePlus
+dotnet run --project tests/PresencePlus.Checks
 ```
 
 The dependency-free executable checks cover priorities, exact reminder boundaries,
@@ -47,7 +47,7 @@ export Graph__Enabled=true
 export Graph__TenantId='<tenant GUID>'
 export Graph__ClientId='<application GUID>'
 export Graph__NotificationUrl='https://your-public-host/graph/notifications'
-dotnet run --project src/DoorPulse --no-launch-profile -- --urls=http://127.0.0.1:5080
+dotnet run --project src/PresencePlus --no-launch-profile -- --urls=http://127.0.0.1:5080
 ```
 
 5. Follow the sign-in URL and one-time code printed on the local console.
@@ -56,7 +56,7 @@ dotnet run --project src/DoorPulse --no-launch-profile -- --urls=http://127.0.0.
    require another interactive sign-in. Restrict access to local console logs.
    Device-code authentication may be blocked by tenant policy.
 
-DoorPulse creates basic (not encrypted rich) subscriptions to
+PresencePlus creates basic (not encrypted rich) subscriptions to
 `communications/presences/{signed-in-user-id}` and `users/{signed-in-user-id}/events`.
 It verifies subscription IDs and constant-time checks random `clientState` values
 before accepting notifications. It never follows notification-supplied resource URLs.
@@ -116,14 +116,14 @@ Content-Type: application/json
 ```
 
 Accept `solid`, `pulse`, and `pulse-fast`, drive the RGB LED accordingly, and return
-2xx after applying the state. The device owns pulse animation; DoorPulse sends
+2xx after applying the state. The device owns pulse animation; PresencePlus sends
 updates only when state changes, retrying failed writes. Color channels may need
 board-specific PWM/gamma correction. Firmware is deliberately a separate adapter
 concern; no particular ESP32 board or LED wiring is assumed.
 
 Use HTTPS when transmitting a key, or an isolated trusted LAN for HTTP-only boards.
 Never expose the device endpoint to the public internet. Configure a device-side
-watchdog/fallback if you need LEDs to turn off when DoorPulse disconnects.
+watchdog/fallback if you need LEDs to turn off when PresencePlus disconnects.
 
 ## Components
 

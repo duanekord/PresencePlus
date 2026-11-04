@@ -4,7 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 
-namespace DoorPulse;
+namespace PresencePlus;
 
 public sealed class GraphNotifications
 {
@@ -39,11 +39,11 @@ public sealed class GraphNotifications
                     !item.TryGetProperty("subscriptionId", out var id) || id.ValueKind != JsonValueKind.String ||
                     !item.TryGetProperty("clientState", out var secret) || secret.ValueKind != JsonValueKind.String ||
                     !notifications.Accept(id.GetString()!, secret.GetString()!))
-                    return Results.Unauthorized();
+                    continue;
                 accepted = true;
             }
             if (accepted) notifications.Signal();
-            return Results.Accepted();
+            return accepted || items.GetArrayLength() == 0 ? Results.Accepted() : Results.Unauthorized();
         }
         catch (JsonException)
         {

@@ -1,6 +1,6 @@
 using System.Net.Http.Json;
 
-namespace DoorPulse;
+namespace PresencePlus;
 
 public interface ILedOutput
 {

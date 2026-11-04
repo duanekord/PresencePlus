@@ -1,9 +1,10 @@
 using System.Text;
 using System.Text.Json;
-using DoorPulse;
+using PresencePlus;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 
 var checks = 0;
 void Equal<T>(T expected, T actual, string name)
@@ -84,6 +85,8 @@ notifications.Signal();
 notifications.Signal();
 Equal(true, notifications.TakeSignal(), "coalesced notification");
 Equal(false, notifications.TakeSignal(), "duplicate coalesced");
+Equal(true, await Receive("""{"value":[{"subscriptionId":"subscription","clientState":"expected-state"},{"subscriptionId":"stale","clientState":"stale"}]}""") is Accepted, "mixed notification batch");
+Equal(true, notifications.TakeSignal(), "valid entry survives stale entry");
 notifications.Remove("subscription");
 Equal(false, notifications.Accept("subscription", "expected-state"), "removed subscription");
 
@@ -101,7 +104,17 @@ Equal("Available", payload.RootElement.GetProperty("status").GetString(), "devic
 Equal("#00FF00", payload.RootElement.GetProperty("color").GetString(), "device color");
 Equal("solid", payload.RootElement.GetProperty("effect").GetString(), "device effect");
 
-Console.WriteLine($"All {checks} DoorPulse checks passed.");
+using var identityClient = new HttpClient(new IdentityHandler());
+var tokenProvider = new GraphTokenProvider(new ClientFactory(identityClient), configuration,
+    NullLogger<GraphTokenProvider>.Instance);
+Equal("first-access", await tokenProvider.GetAsync(CancellationToken.None), "initial sign-in");
+Equal(1, tokenProvider.SignInVersion, "initial account version");
+Equal("second-access", await tokenProvider.GetAsync(CancellationToken.None), "interactive reauthentication");
+Equal(2, tokenProvider.SignInVersion, "reauthentication invalidates cached identity");
+Equal("second-access", await tokenProvider.GetAsync(CancellationToken.None), "cached access token");
+Equal(2, tokenProvider.SignInVersion, "cached access preserves identity version");
+
+Console.WriteLine($"All {checks} PresencePlus checks passed.");
 
 sealed class DeviceHandler : HttpMessageHandler
 {
@@ -116,4 +129,28 @@ sealed class DeviceHandler : HttpMessageHandler
         Body = await request.Content!.ReadAsStringAsync(cancellationToken);
         return new HttpResponseMessage(System.Net.HttpStatusCode.OK);
     }
+
+}
+
+sealed class ClientFactory(HttpClient client) : IHttpClientFactory
+{
+    public HttpClient CreateClient(string name) => client;
+}
+
+sealed class IdentityHandler : HttpMessageHandler
+{
+    private readonly Queue<string> responses = new(new[]
+    {
+        """{"device_code":"test-device","verification_uri":"https://example.test","user_code":"test","expires_in":900,"interval":0}""",
+        """{"access_token":"first-access","refresh_token":"test-refresh","expires_in":1}""",
+        """{"error":"invalid_grant"}""",
+        """{"device_code":"test-device","verification_uri":"https://example.test","user_code":"test","expires_in":900,"interval":0}""",
+        """{"access_token":"second-access","refresh_token":"test-refresh","expires_in":3600}"""
+    });
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+        Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent(responses.Dequeue())
+        });
 }

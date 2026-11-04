@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace DoorPulse;
+namespace PresencePlus;
 
 public static class GraphOptions
 {
@@ -22,6 +22,7 @@ public sealed class GraphTokenProvider(
     private string? accessToken;
     private string? refreshToken;
     private DateTimeOffset expires;
+    public int SignInVersion { get; private set; }
     private readonly string authority = $"https://login.microsoftonline.com/{configuration["Graph:TenantId"]}/oauth2/v2.0/";
     private const string Scopes = "https://graph.microsoft.com/User.Read https://graph.microsoft.com/Presence.Read.All https://graph.microsoft.com/Calendars.Read offline_access";
 
@@ -56,7 +57,11 @@ public sealed class GraphTokenProvider(
             {
                 ["grant_type"] = "urn:ietf:params:oauth:grant-type:device_code", ["device_code"] = code.GetString()!
             }, cancellationToken);
-            if (token.RootElement.TryGetProperty("access_token", out _)) return Save(token.RootElement);
+            if (token.RootElement.TryGetProperty("access_token", out _))
+            {
+                SignInVersion++;
+                return Save(token.RootElement);
+            }
             var error = token.RootElement.GetProperty("error").GetString();
             if (error == "slow_down") interval += 5;
             else if (error != "authorization_pending")
