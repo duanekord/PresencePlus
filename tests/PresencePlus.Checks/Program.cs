@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Identity.Client;
 
 var checks = 0;
 void Equal<T>(T expected, T actual, string name)
@@ -104,15 +105,131 @@ Equal("Available", payload.RootElement.GetProperty("status").GetString(), "devic
 Equal("#00FF00", payload.RootElement.GetProperty("color").GetString(), "device color");
 Equal("solid", payload.RootElement.GetProperty("effect").GetString(), "device effect");
 
-using var identityClient = new HttpClient(new IdentityHandler());
-var tokenProvider = new GraphTokenProvider(new ClientFactory(identityClient), configuration,
-    NullLogger<GraphTokenProvider>.Instance);
-Equal("first-access", await tokenProvider.GetAsync(CancellationToken.None), "initial sign-in");
-Equal(1, tokenProvider.SignInVersion, "initial account version");
-Equal("second-access", await tokenProvider.GetAsync(CancellationToken.None), "interactive reauthentication");
+async Task<TException> ThrowsAsync<TException>(Func<Task> action, string name) where TException : Exception
+{
+    try { await action(); }
+    catch (TException exception)
+    {
+        checks++;
+        return exception;
+    }
+    throw new InvalidOperationException($"{name}: expected {typeof(TException).Name}");
+}
+
+var clock = new CheckClock(now);
+GraphTokenProvider Provider(CheckAuthentication authentication) =>
+    new(authentication, clock, NullLogger<GraphTokenProvider>.Instance);
+GraphAccessToken Token(string access = "first-access", string account = "tenant/account", int minutes = 60) =>
+    new(access, clock.GetUtcNow().AddMinutes(minutes), account);
+Task<GraphAccessToken> NeedsInteraction(CancellationToken _) =>
+    Task.FromException<GraphAccessToken>(new MsalUiRequiredException("interaction_required", "Test sign-in required."));
+
+var silent = new CheckAuthentication();
+silent.Silent.Enqueue(_ => Task.FromResult(Token(minutes: 3)));
+silent.Silent.Enqueue(_ => Task.FromResult(Token("refreshed-access")));
+silent.Silent.Enqueue(_ => Task.FromResult(Token("other-access", "tenant/other-account")));
+var tokenProvider = Provider(silent);
+Equal("first-access", await tokenProvider.GetAsync(CancellationToken.None), "silent startup");
+Equal(1, tokenProvider.SignInVersion, "silent startup initializes identity");
+Equal("first-access", await tokenProvider.GetAsync(CancellationToken.None), "cached access token");
+Equal(1, silent.SilentCalls, "cached token avoids broker calls");
+clock.Advance(TimeSpan.FromMinutes(1));
+Equal("refreshed-access", await tokenProvider.GetAsync(CancellationToken.None), "refresh at two-minute boundary");
+Equal(1, tokenProvider.SignInVersion, "silent refresh preserves identity");
+clock.Advance(TimeSpan.FromHours(1));
+Equal("other-access", await tokenProvider.GetAsync(CancellationToken.None), "silent account change");
+Equal(2, tokenProvider.SignInVersion, "silent account change invalidates Graph identity");
+Equal(0, silent.InteractiveCalls, "silent success never opens sign-in UI");
+
+var interactive = new CheckAuthentication();
+interactive.Silent.Enqueue(NeedsInteraction);
+interactive.Interactive.Enqueue(_ => Task.FromResult(Token(minutes: 3)));
+interactive.Silent.Enqueue(NeedsInteraction);
+interactive.Interactive.Enqueue(_ => Task.FromResult(Token("second-access")));
+tokenProvider = Provider(interactive);
+Equal("first-access", await tokenProvider.GetAsync(CancellationToken.None), "broker interactive fallback");
+Equal(1, tokenProvider.SignInVersion, "initial interactive account version");
+Equal(1, interactive.InteractiveCalls, "interactive fallback only when required");
+clock.Advance(TimeSpan.FromMinutes(1));
+Equal("second-access", await tokenProvider.GetAsync(CancellationToken.None), "broker reauthentication");
 Equal(2, tokenProvider.SignInVersion, "reauthentication invalidates cached identity");
-Equal("second-access", await tokenProvider.GetAsync(CancellationToken.None), "cached access token");
+Equal("second-access", await tokenProvider.GetAsync(CancellationToken.None), "cached interactive access token");
 Equal(2, tokenProvider.SignInVersion, "cached access preserves identity version");
+
+var restarted = new CheckAuthentication();
+restarted.Silent.Enqueue(_ => Task.FromResult(Token("restart-access")));
+Equal("restart-access", await Provider(restarted).GetAsync(CancellationToken.None), "restart can reuse broker sign-in silently");
+Equal(0, restarted.InteractiveCalls, "restart does not force interactive sign-in");
+
+var failing = new CheckAuthentication();
+failing.Silent.Enqueue(_ => Task.FromException<GraphAccessToken>(new MsalServiceException("temporarily_unavailable", "Test outage.")));
+tokenProvider = Provider(failing);
+var failure = await ThrowsAsync<InvalidOperationException>(() => tokenProvider.GetAsync(CancellationToken.None), "broker errors surface");
+Equal(true, failure.InnerException is MsalServiceException, "preserve broker error for diagnostics");
+Equal(0, failing.InteractiveCalls, "network errors do not trigger interactive sign-in");
+Equal(0, tokenProvider.SignInVersion, "failed authentication preserves identity version");
+
+var canceledPrompt = new CheckAuthentication();
+canceledPrompt.Silent.Enqueue(NeedsInteraction);
+canceledPrompt.Silent.Enqueue(NeedsInteraction);
+canceledPrompt.Silent.Enqueue(NeedsInteraction);
+canceledPrompt.Interactive.Enqueue(_ => Task.FromException<GraphAccessToken>(new MsalClientException("authentication_canceled", "Test cancellation.")));
+canceledPrompt.Interactive.Enqueue(_ => Task.FromResult(Token("retry-access")));
+tokenProvider = Provider(canceledPrompt);
+await ThrowsAsync<InvalidOperationException>(() => tokenProvider.GetAsync(CancellationToken.None), "canceled broker prompt surfaces");
+await ThrowsAsync<InvalidOperationException>(() => tokenProvider.GetAsync(CancellationToken.None), "failed prompt cooldown");
+Equal(1, canceledPrompt.InteractiveCalls, "failed prompt does not reopen on every Graph retry");
+clock.Advance(TimeSpan.FromMinutes(5));
+Equal("retry-access", await tokenProvider.GetAsync(CancellationToken.None), "interactive retry after cooldown");
+Equal(2, canceledPrompt.InteractiveCalls, "prompt resumes after cooldown");
+Equal(1, tokenProvider.SignInVersion, "only successful interactive sign-in updates identity");
+
+var invalid = new CheckAuthentication();
+invalid.Silent.Enqueue(_ => Task.FromResult(Token(access: "")));
+invalid.Silent.Enqueue(_ => Task.FromResult(Token(account: "")));
+invalid.Silent.Enqueue(_ => Task.FromResult(Token(minutes: 0)));
+tokenProvider = Provider(invalid);
+await ThrowsAsync<InvalidOperationException>(() => tokenProvider.GetAsync(CancellationToken.None), "reject empty access token");
+await ThrowsAsync<InvalidOperationException>(() => tokenProvider.GetAsync(CancellationToken.None), "reject missing account");
+await ThrowsAsync<InvalidOperationException>(() => tokenProvider.GetAsync(CancellationToken.None), "reject expired token");
+Equal(0, tokenProvider.SignInVersion, "invalid token never updates identity");
+
+using var canceled = new CancellationTokenSource();
+canceled.Cancel();
+await ThrowsAsync<OperationCanceledException>(() => tokenProvider.GetAsync(canceled.Token), "pre-canceled request");
+Equal(3, invalid.SilentCalls, "pre-canceled request never contacts broker");
+var cancellation = new CheckAuthentication();
+cancellation.Silent.Enqueue(token => Task.FromCanceled<GraphAccessToken>(new CancellationToken(true)));
+tokenProvider = Provider(cancellation);
+await ThrowsAsync<OperationCanceledException>(() => tokenProvider.GetAsync(CancellationToken.None), "silent cancellation propagates");
+Equal(0, cancellation.InteractiveCalls, "silent cancellation never opens UI");
+
+using var forwardedCancellation = new CancellationTokenSource();
+var forwarding = new CheckAuthentication();
+forwarding.Silent.Enqueue(token =>
+{
+    Equal(forwardedCancellation.Token, token, "silent cancellation token forwarded");
+    return NeedsInteraction(token);
+});
+forwarding.Interactive.Enqueue(token =>
+{
+    Equal(forwardedCancellation.Token, token, "interactive cancellation token forwarded");
+    return Task.FromCanceled<GraphAccessToken>(new CancellationToken(true));
+});
+await ThrowsAsync<OperationCanceledException>(() => Provider(forwarding).GetAsync(forwardedCancellation.Token), "interactive cancellation propagates");
+
+var graphConfiguration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+{
+    ["Graph:TenantId"] = "11111111-1111-1111-1111-111111111111",
+    ["Graph:ClientId"] = "22222222-2222-2222-2222-222222222222",
+    ["Graph:NotificationUrl"] = "https://example.test/graph/notifications"
+}).Build();
+GraphOptions.Validate(graphConfiguration);
+if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 15063) && Environment.UserInteractive)
+{
+    _ = new WindowsBrokerAuthentication(graphConfiguration);
+    checks++;
+}
 
 Console.WriteLine($"All {checks} PresencePlus checks passed.");
 
@@ -132,25 +249,29 @@ sealed class DeviceHandler : HttpMessageHandler
 
 }
 
-sealed class ClientFactory(HttpClient client) : IHttpClientFactory
+sealed class CheckClock(DateTimeOffset now) : TimeProvider
 {
-    public HttpClient CreateClient(string name) => client;
+    private DateTimeOffset current = now;
+    public override DateTimeOffset GetUtcNow() => current;
+    public void Advance(TimeSpan amount) => current += amount;
 }
 
-sealed class IdentityHandler : HttpMessageHandler
+sealed class CheckAuthentication : IGraphAuthentication
 {
-    private readonly Queue<string> responses = new(new[]
-    {
-        """{"device_code":"test-device","verification_uri":"https://example.test","user_code":"test","expires_in":900,"interval":0}""",
-        """{"access_token":"first-access","refresh_token":"test-refresh","expires_in":1}""",
-        """{"error":"invalid_grant"}""",
-        """{"device_code":"test-device","verification_uri":"https://example.test","user_code":"test","expires_in":900,"interval":0}""",
-        """{"access_token":"second-access","refresh_token":"test-refresh","expires_in":3600}"""
-    });
+    public Queue<Func<CancellationToken, Task<GraphAccessToken>>> Silent { get; } = new();
+    public Queue<Func<CancellationToken, Task<GraphAccessToken>>> Interactive { get; } = new();
+    public int SilentCalls { get; private set; }
+    public int InteractiveCalls { get; private set; }
 
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
-        Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
-        {
-            Content = new StringContent(responses.Dequeue())
-        });
+    public Task<GraphAccessToken> AcquireSilentAsync(CancellationToken cancellationToken)
+    {
+        SilentCalls++;
+        return Silent.Dequeue()(cancellationToken);
+    }
+
+    public Task<GraphAccessToken> AcquireInteractiveAsync(string? claims, CancellationToken cancellationToken)
+    {
+        InteractiveCalls++;
+        return Interactive.Dequeue()(cancellationToken);
+    }
 }
