@@ -1,4 +1,4 @@
-using System.Text.Json;
+using Microsoft.Identity.Client;
 
 namespace PresencePlus;
 
@@ -16,74 +16,62 @@ public static class GraphOptions
     }
 }
 
+public sealed record GraphAccessToken(string AccessToken, DateTimeOffset ExpiresOn, string AccountId);
+
+public interface IGraphAuthentication
+{
+    Task<GraphAccessToken> AcquireSilentAsync(CancellationToken cancellationToken);
+    Task<GraphAccessToken> AcquireInteractiveAsync(string? claims, CancellationToken cancellationToken);
+}
+
 public sealed class GraphTokenProvider(
-    IHttpClientFactory clients, IConfiguration configuration, ILogger<GraphTokenProvider> logger)
+    IGraphAuthentication authentication, TimeProvider clock, ILogger<GraphTokenProvider> logger)
 {
     private string? accessToken;
-    private string? refreshToken;
+    private string? accountId;
     private DateTimeOffset expires;
+    private DateTimeOffset interactiveRetryAt;
     public int SignInVersion { get; private set; }
-    private readonly string authority = $"https://login.microsoftonline.com/{configuration["Graph:TenantId"]}/oauth2/v2.0/";
-    private const string Scopes = "https://graph.microsoft.com/User.Read https://graph.microsoft.com/Presence.Read.All https://graph.microsoft.com/Calendars.Read offline_access";
 
     public async Task<string> GetAsync(CancellationToken cancellationToken)
     {
-        if (accessToken is not null && expires > DateTimeOffset.UtcNow.AddMinutes(2)) return accessToken;
-        if (refreshToken is not null)
+        cancellationToken.ThrowIfCancellationRequested();
+        if (accessToken is not null && expires > clock.GetUtcNow().AddMinutes(2)) return accessToken;
+        try
         {
-            using var refresh = await PostAsync("token", new()
+            GraphAccessToken token;
+            var interactive = false;
+            try
             {
-                ["grant_type"] = "refresh_token", ["refresh_token"] = refreshToken, ["scope"] = Scopes
-            }, cancellationToken);
-            if (refresh.RootElement.TryGetProperty("access_token", out _)) return Save(refresh.RootElement);
-            var error = refresh.RootElement.GetProperty("error").GetString();
-            if (error is not ("invalid_grant" or "interaction_required"))
-                throw new InvalidOperationException("Token refresh failed; check Entra configuration or service availability.");
-            refreshToken = null;
-        }
-
-        using var device = await PostAsync("devicecode", new() { ["scope"] = Scopes }, cancellationToken);
-        var root = device.RootElement;
-        if (!root.TryGetProperty("device_code", out var code))
-            throw new InvalidOperationException("Unable to start device sign-in; check Entra public-client configuration.");
-        logger.LogInformation("Sign in at {Uri} using code {Code}. Tokens are kept in memory only.",
-            root.GetProperty("verification_uri").GetString(), root.GetProperty("user_code").GetString());
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(root.GetProperty("expires_in").GetInt32());
-        var interval = root.GetProperty("interval").GetInt32();
-        while (DateTimeOffset.UtcNow < deadline)
-        {
-            await Task.Delay(TimeSpan.FromSeconds(interval), cancellationToken);
-            using var token = await PostAsync("token", new()
-            {
-                ["grant_type"] = "urn:ietf:params:oauth:grant-type:device_code", ["device_code"] = code.GetString()!
-            }, cancellationToken);
-            if (token.RootElement.TryGetProperty("access_token", out _))
-            {
-                SignInVersion++;
-                return Save(token.RootElement);
+                token = await authentication.AcquireSilentAsync(cancellationToken);
             }
-            var error = token.RootElement.GetProperty("error").GetString();
-            if (error == "slow_down") interval += 5;
-            else if (error != "authorization_pending")
-                throw new InvalidOperationException("Device sign-in failed; retry and verify tenant policy and consent.");
+            catch (MsalUiRequiredException exception)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (clock.GetUtcNow() < interactiveRetryAt)
+                    throw new InvalidOperationException("Interactive sign-in is paused after a failed attempt; retrying within five minutes.");
+                logger.LogInformation("PresencePlus needs Microsoft sign-in. Complete the Windows account prompt in your logged-in session.");
+                interactiveRetryAt = clock.GetUtcNow().AddMinutes(5);
+                token = await authentication.AcquireInteractiveAsync(exception.Claims, cancellationToken);
+                interactive = true;
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(token.AccessToken) || string.IsNullOrWhiteSpace(token.AccountId) ||
+                token.ExpiresOn <= clock.GetUtcNow())
+                throw new InvalidOperationException("Microsoft sign-in did not return a usable token and account.");
+            if (accountId != token.AccountId || interactive) SignInVersion++;
+            accountId = token.AccountId;
+            accessToken = token.AccessToken;
+            expires = token.ExpiresOn;
+            interactiveRetryAt = DateTimeOffset.MinValue;
+            return accessToken;
         }
-        throw new InvalidOperationException("Device sign-in expired; retrying.");
-    }
-
-    private string Save(JsonElement token)
-    {
-        accessToken = token.GetProperty("access_token").GetString()!;
-        if (token.TryGetProperty("refresh_token", out var value)) refreshToken = value.GetString();
-        expires = DateTimeOffset.UtcNow.AddSeconds(token.GetProperty("expires_in").GetInt32());
-        return accessToken;
-    }
-
-    private async Task<JsonDocument> PostAsync(string path, Dictionary<string, string> values, CancellationToken cancellationToken)
-    {
-        values["client_id"] = configuration["Graph:ClientId"]!;
-        using var body = new FormUrlEncodedContent(values);
-        using var response = await clients.CreateClient("identity").PostAsync(authority + path, body, cancellationToken);
-        // OAuth errors have structured JSON even when the response is not successful.
-        return JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+        catch (MsalException exception)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            logger.LogWarning("Microsoft sign-in failed ({ErrorCode}, correlation {CorrelationId}). Check the broker redirect URI, consent, tenant policy and connectivity. Interactive failures wait five minutes before prompting again.",
+                exception.ErrorCode, exception.CorrelationId);
+            throw new InvalidOperationException("Microsoft sign-in failed; see the authentication diagnostic in the local console.", exception);
+        }
     }
 }

@@ -8,7 +8,6 @@ builder.Services.AddHttpClient("graph", client =>
     client.BaseAddress = new Uri("https://graph.microsoft.com/v1.0/");
     client.Timeout = TimeSpan.FromSeconds(30);
 });
-builder.Services.AddHttpClient("identity", client => client.Timeout = TimeSpan.FromSeconds(30));
 builder.Services.AddHttpClient<WifiLed>(client => client.Timeout = TimeSpan.FromSeconds(5))
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddSingleton<ILedOutput>(services =>
@@ -19,6 +18,8 @@ builder.Services.AddHostedService<LedWorker>();
 if (builder.Configuration.GetValue<bool>("Graph:Enabled"))
 {
     GraphOptions.Validate(builder.Configuration);
+    builder.Services.AddSingleton(TimeProvider.System);
+    builder.Services.AddSingleton<IGraphAuthentication, WindowsBrokerAuthentication>();
     builder.Services.AddSingleton<GraphTokenProvider>();
     builder.Services.AddHostedService<GraphWorker>();
 }
