@@ -1,0 +1,70 @@
+name: Windows build and release
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.2'
+          cache: npm
+          cache-dependency-path: src/PresencePlus.Matter/package-lock.json
+      - name: Restore and check Matter helper
+        working-directory: src/PresencePlus.Matter
+        shell: pwsh
+        run: |
+          npm ci --ignore-scripts --no-fund --no-audit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check Windows UI, settings, and process protocol
+        shell: pwsh
+        run: dotnet run --project .\tests\PresencePlus.Checks -c Release -- --node (Get-Command node).Source
+      - name: Create portable package
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.Substring(1) } else { "0.1.0-ci.$env:GITHUB_RUN_NUMBER" }
+          .\scripts\Package.ps1 -Version $version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PresencePlus-win-x64
+          path: |
+            artifacts/packages/*.zip
+            artifacts/packages/*.sha256
+          if-no-files-found: error
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: PresencePlus-win-x64
+          path: release
+      - name: Publish GitHub download
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME .\release\*.zip .\release\*.sha256 --verify-tag --title "PresencePlus $env:GITHUB_REF_NAME" --generate-notes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
