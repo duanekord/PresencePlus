@@ -26,6 +26,10 @@ Environment.default.vars.set("storage.path", storage);
 let controller: ServerNode | undefined;
 let bluetoothEnabled = false;
 
+async function loadBluetooth() {
+    await import("@matter/nodejs-ble");
+}
+
 async function getController(pairing: boolean) {
     if (controller) {
         if (pairing && !bluetoothEnabled) throw new MatterError("RestartRequired", "Restart the controller before pairing.");
@@ -33,7 +37,7 @@ async function getController(pairing: boolean) {
     }
     bluetoothEnabled = pairing;
     Environment.default.vars.set("ble.enable", pairing);
-    if (pairing) await import("@matter/nodejs-ble");
+    if (pairing) await loadBluetooth();
     const node = await ServerNode.create(ServerNode.RootEndpointWithoutGroupcast.with(ControllerBehavior, DclBehavior), {
         id: "presenceplus-ge-controller",
         network: { ble: false, tcp: false, autoStartCommissionedPeers: false },
@@ -121,6 +125,14 @@ async function execute(request: Request, signal: AbortSignal) {
 }
 
 async function main() {
+    if (process.argv.includes("--check-bluetooth")) {
+        await loadBluetooth();
+        const { require } = await import("@matter/nodejs-ble/require");
+        const noble = require("@stoprocent/noble") as { startScanningAsync?: unknown };
+        if (typeof noble.startScanningAsync !== "function") throw new Error("Windows Bluetooth binding is unavailable.");
+        process.stdout.write("Windows Bluetooth runtime loaded.\n");
+        return;
+    }
     const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
     try {
         for await (const line of input) {
