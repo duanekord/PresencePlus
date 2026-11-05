@@ -1,13 +1,22 @@
 # PresencePlus
 
-A Windows tray app that controls a Matter color light directly over your local
-network. Choose your status in the window or tray menu. No Microsoft 365 access,
-Azure hosting, Google Home, Home Assistant, Cync API, LED URL, API key, web server,
-or public tunnel is required.
+A Windows tray app for **manually setting a Matter light's status color** over
+your local network. Choose Available, Busy, Do not disturb, In a meeting,
+Presenting, Away, or Off in the window or tray menu.
 
-The WinForms app owns one local Matter.js helper process, communicating through
-private standard-input/output pipes. Bluetooth is used for initial commissioning;
-normal control and reconnect use the light's local Wi-Fi/IPv6 connection.
+**Status is manual.** PresencePlus does not read your presence, calendar, or
+activity from other applications. No account sign-in is required.
+
+The app currently provides:
+
+- Direct control of one Matter-over-Wi-Fi color light.
+- Independently configurable status colors and adjustable brightness.
+- A compact connection indicator, reconnect control, and automatic retries.
+- Saved status, colors, brightness, and pairing across app restarts.
+- Background operation in the Windows tray and optional startup at Windows login.
+
+Bluetooth is used for first-time pairing. After pairing, control uses the local
+Wi-Fi/IPv6 network.
 
 ## Download and run
 
@@ -23,9 +32,10 @@ approval; these are previews, not a claim that the changes are already on `main`
    beside it; the executable is not a standalone single file.
 3. Follow the pairing walkthrough below, then choose a status.
 
-The portable download includes **.NET and Node.js**. You do not need an SDK,
-PowerShell, a global Node installation, Azure resources, or an account to run it.
-No administrator installation or Windows service is required.
+The portable download includes **.NET**, which runs the Windows interface, and
+**Node.js**, which runs the Matter controller. Neither needs to be installed
+separately or globally. You do not need an SDK, PowerShell, or an account to run
+the app. No administrator installation or Windows service is required.
 
 **Requirements:** Windows x64 (Windows 11 recommended), a supported Matter-over-Wi-Fi
 color light, Bluetooth for first-time setup, and a local network with IPv6 and
@@ -36,7 +46,7 @@ Wi-Fi. Internet access is needed during pairing for certificate verification.
 This is an early release: tested hardware is a **GE Cync Indoor Light Strip 32ft**
 (`CSTR32CBDM/MSS-1P`). Other hue/saturation-capable Matter-over-Wi-Fi lights may work
 but are not yet verified. Thread commissioning, multiple lights, and automatic
-Teams presence are not supported. Linux, macOS, and ARM64 packages are not provided.
+status detection are not supported. Linux, macOS, and ARM64 packages are not provided.
 
 Release archives have a companion `.sha256` file. To compare a download:
 
@@ -67,8 +77,8 @@ organization's software policy before deciding whether to run the app.
 ![Pairing dialog showing empty Matter code, Wi-Fi name, and masked password fields](docs/screenshots/pairing.png)
 
 3. **Wait for Connected.** Bluetooth securely commissions the light and provisions
-   its Wi-Fi connection. Subsequent control uses the local network, not Bluetooth,
-   Google Home, or Cync's cloud. The app saves its controller identity, so pairing
+   its Wi-Fi connection. Subsequent control uses the local network, not Bluetooth
+   or a cloud-control service. The app saves its controller identity, so pairing
    is not repeated on Windows login or app restart. Keep the PC and light on the
    same reachable LAN; a guest network with client isolation will prevent control.
 4. **Choose a status.** Use a window button or the notification-area menu. The
@@ -88,8 +98,8 @@ organization's software policy before deciding whether to run the app.
 Screenshots are rendered from the actual Windows forms with simulated output and
 empty credential fields; they contain no real Wi-Fi details or pairing secrets.
 This version supports **one paired light endpoint**. Pairing again does not
-silently replace it. Do not copy controller identities between PCs or run the
-experiment and tray app against copies of the same identity simultaneously.
+silently replace it. Keep the saved controller identity private; do not copy it
+between PCs or run multiple controllers against copies of that identity.
 
 ## Technologies and architecture
 
@@ -103,9 +113,9 @@ experiment and tray app against copies of the same identity simultaneously.
 | Preferences and pairing | Per-user JSON preferences and a separately permission-restricted Matter fabric store |
 | Distribution | Self-contained Windows x64 ZIP, SHA256 checksum, GitHub Actions and GitHub Releases |
 
-No Graph permissions, Entra app registration, cloud hosting, Google Home, or Cync
-API is required. Internet access for production attestation is distinct from a
-cloud-based light-control service.
+The Windows app owns one Matter controller process and communicates with it
+through private pipes. Initial pairing uses internet access for production device
+attestation; normal light-control commands are sent over the local network.
 
 ## Troubleshooting
 
@@ -120,19 +130,6 @@ cloud-based light-control service.
 | Already running | Open the existing instance from the notification area, including hidden tray icons. |
 | Preferences cannot load | Review the startup error and `%LOCALAPPDATA%\PresencePlus\settings.json`; invalid values are surfaced instead of silently discarded. |
 | Paired light still on after Exit | Expected: Exit stops control, not the light. Choose **Off** and wait for **Connected** first. |
-
-### Preserve a pairing from the local experiment
-
-Exit PresencePlus and stop the experimental controller before importing:
-
-```powershell
-.\scripts\Import-MatterPairing.ps1 -SourceDirectory 'C:\path\to\experiment\hardware-storage'
-```
-
-The importer preserves the original controller namespace and fabric credentials,
-restricts the destination to your Windows account, and refuses to overwrite an
-existing destination. It leaves the original source intact. No reset or new
-setup code is needed for an imported working pairing.
 
 ## Status, colors, and brightness
 
@@ -151,7 +148,7 @@ Choose **Colors...** to customize each lit status with the Windows color picker.
 restores the original colors when saved. Changing the active status's color
 updates the light immediately. **Off** is always power-off, not an editable color.
 
-These are manual choices, not detected Teams presence. All colors are solid.
+Every status is a manual choice. All colors are solid.
 The brightness setting scales the palette's RGB intensity; purple retains its
 lower original intensity. Colors and brightness are applied before power-on to
 avoid flashing the previous color. The tray icon reflects your selection; the
@@ -192,11 +189,9 @@ and copying it grants control of the paired light. Permissions are not encrypted
 storage and do not protect against software already running as your user.
 Keep this directory out of source control, shared logs, and unprotected backups.
 
-Production attestation checks remain enabled. The only permitted finding is the
-informational `PaaTrustStoreTimeMismatch`, emitted when a freshly initialized
-controller downloads a trusted root after the device certificate was issued.
-Certificate errors, warnings, test certificates, unavailable trust services, and
-all other findings remain blocked. Raw protocol payloads are not logged.
+Pairing verifies the device's attestation against CSA's production certificate
+service. Certificate errors, warnings, test certificates, and unavailable trust
+services block pairing. Raw protocol payloads are not logged.
 
 The helper uses no listener or HTTP port for app communication. Do not expose
 Matter services to the public internet. Your network must allow local IPv6 and
@@ -215,16 +210,9 @@ or Windows service. Uncheck the option to remove the entry.
 
 The independent **Start minimized to the tray** preference applies to manual
 launches too. Disable startup before moving the executable, then re-enable it
-from the new location. Remove any older scheduled task to avoid duplicate
-launches. Windows or organizational policies can restrict startup.
+from the new location. Windows or organizational policies can restrict startup.
 
-## Migrating older versions
-
-Stop the old PresencePlus app, Caddy, and any tunnel. Graph/MSAL, webhooks,
-automatic meeting detection, and the custom HTTP LED contract are removed.
-`Graph__*`, `Led__Url`, `Led__ApiKey`, appsettings files, and `--urls` no longer
-configure the app. Old saved `LedUrl` fields are ignored while status and tray
-preferences are preserved; the next settings save drops obsolete fields.
+## Updating the app
 
 To update a portable installation, choose **Exit**, extract the new archive into
 the app folder, and run it again. Preferences and pairing are kept outside the app
