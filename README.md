@@ -12,8 +12,10 @@ normal control and reconnect use the light's local Wi-Fi/IPv6 connection.
 ## Download and run
 
 Download the **PresencePlus-...-win-x64.zip** asset from the
-[latest GitHub release](https://github.com/duanekord/PresencePlus/releases/latest),
+[GitHub Releases](https://github.com/duanekord/PresencePlus/releases),
 not GitHub's automatic **Source code** ZIP.
+Early downloads may be marked **Pre-release** while the pull request is awaiting
+approval; these are previews, not a claim that the changes are already on `main`.
 
 1. Extract the entire ZIP into a permanent folder you can write to, such as
    `%LOCALAPPDATA%\PresencePlus\app`.
@@ -42,7 +44,8 @@ Release archives have a companion `.sha256` file. To compare a download:
 Get-FileHash .\PresencePlus-0.1.0-win-x64.zip -Algorithm SHA256
 ```
 
-Compare the result with the hash in the matching `.sha256` asset. A checksum checks
+Use the actual versioned filename you downloaded and compare the result with the
+hash in its matching `.sha256` asset. A checksum checks
 integrity, not publisher identity. Builds are currently **unsigned**; Windows may
 show publisher/reputation warnings. Review the source, release origin, and your
 organization's software policy before deciding whether to run the app.
@@ -265,6 +268,9 @@ git push origin v0.1.0
 
 Use a new semantic version for each release. Do not retag an existing download.
 Release publishing uses only the workflow's repository-scoped GitHub token.
+Tags with a suffix, such as `v0.1.0-rc.1`, publish a clearly marked pre-release;
+normal releases should be tagged from reviewed `main`. Branch protections still
+apply: a successful build does not replace a required approving review.
 
 The project has not yet selected an open-source license. Third-party components
 retain their own licenses, included in the download's `licenses` directory,

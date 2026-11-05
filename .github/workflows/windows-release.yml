@@ -66,5 +66,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create $env:GITHUB_REF_NAME .\release\*.zip .\release\*.sha256 --verify-tag --title "PresencePlus $env:GITHUB_REF_NAME" --generate-notes
+          $releaseArgs = @('release', 'create', $env:GITHUB_REF_NAME, '.\release\*.zip', '.\release\*.sha256',
+            '--verify-tag', '--title', "PresencePlus $env:GITHUB_REF_NAME", '--generate-notes')
+          if ($env:GITHUB_REF_NAME.Contains('-')) { $releaseArgs += '--prerelease' }
+          & gh @releaseArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
