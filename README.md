@@ -128,6 +128,7 @@ attestation; normal light-control commands are sent over the local network.
 | Attestation fails | Ensure internet access to CSA's production certificate service. Verification is intentionally not bypassed. |
 | Runtime missing / app will not start | Extract the whole release ZIP, not just the executable or the source ZIP. Keep the `Matter` folder beside the executable. |
 | Already running | Open the existing instance from the notification area, including hidden tray icons. |
+| Does not run at Windows sign-in after moving/upgrading | Exit any old instance and launch the new copy once to refresh an existing startup registration. For older releases, uncheck and recheck **Start PresencePlus when I sign into Windows** in the new copy. Also check Windows Startup apps for a disabled entry. |
 | Preferences cannot load | Review the startup error and `%LOCALAPPDATA%\PresencePlus\settings.json`; invalid values are surfaced instead of silently discarded. |
 | Paired light still on after Exit | Expected: Exit stops control, not the light. Choose **Off** and wait for **Connected** first. |
 
@@ -209,13 +210,20 @@ to that executable with `--minimized`. It requires no administrator privileges
 or Windows service. Uncheck the option to remove the entry.
 
 The independent **Start minimized to the tray** preference applies to manual
-launches too. Disable startup before moving the executable, then re-enable it
-from the new location. Windows or organizational policies can restrict startup.
+launches too; it does not enable Windows startup by itself. If startup was already
+enabled, launching PresencePlus from a new folder refreshes the registration to
+that copy before showing the window. You do not need to toggle the checkbox after
+an upgrade. If startup was disabled, launching a new copy leaves it disabled.
+Windows or organizational policies can still disable or restrict startup; the app
+does not override those controls.
 
 ## Updating the app
 
 To update a portable installation, choose **Exit**, extract the new archive into
-the app folder, and run it again. Preferences and pairing are kept outside the app
+the app folder or a new permanent folder, and run the new copy once. If startup
+was enabled, this updates its registered executable path, even when the previous
+folder has already been deleted. Windows cannot find a moved copy until you
+launch it once. Preferences and pairing are kept outside the app
 folder and survive upgrades. Do not delete `%LOCALAPPDATA%\PresencePlus\Matter`
 or share it with another person. Extracting a release never imports somebody
 else's pairing.
