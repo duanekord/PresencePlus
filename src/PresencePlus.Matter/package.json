@@ -1,0 +1,23 @@
+{
+  "name": "presenceplus-matter",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "24.x" },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/control.test.js"
+  },
+  "dependencies": {
+    "@matter/general": "0.18.0",
+    "@matter/node": "0.18.0",
+    "@matter/nodejs": "0.18.0",
+    "@matter/nodejs-ble": "0.18.0",
+    "@matter/protocol": "0.18.0",
+    "@matter/types": "0.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
+  }
+}

@@ -3,3 +3,7 @@
 .vs/
 *.user
 **/appsettings.Local.json
+**/node_modules/
+**/dist/
+.tools/
+artifacts/

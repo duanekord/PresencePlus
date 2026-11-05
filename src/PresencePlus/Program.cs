@@ -1,38 +1,40 @@
-using PresencePlus;
+using System.Security;
+using System.Security.Principal;
+using System.Text.Json;
 
-var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddSingleton<OfficeState>();
-builder.Services.AddSingleton<GraphNotifications>();
-builder.Services.AddHttpClient("graph", client =>
-{
-    client.BaseAddress = new Uri("https://graph.microsoft.com/v1.0/");
-    client.Timeout = TimeSpan.FromSeconds(30);
-});
-builder.Services.AddHttpClient<WifiLed>(client => client.Timeout = TimeSpan.FromSeconds(5))
-    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
-builder.Services.AddSingleton<ILedOutput>(services =>
-    builder.Configuration["Led:Url"] is { Length: > 0 }
-        ? services.GetRequiredService<WifiLed>()
-        : ActivatorUtilities.CreateInstance<ConsoleLed>(services));
-builder.Services.AddHostedService<LedWorker>();
-if (builder.Configuration.GetValue<bool>("Graph:Enabled"))
-{
-    GraphOptions.Validate(builder.Configuration);
-    builder.Services.AddSingleton(TimeProvider.System);
-    builder.Services.AddSingleton<IGraphAuthentication, WindowsBrokerAuthentication>();
-    builder.Services.AddSingleton<GraphTokenProvider>();
-    builder.Services.AddHostedService<GraphWorker>();
-}
+namespace PresencePlus;
 
-var app = builder.Build();
-if (builder.Configuration.GetValue<bool>("Demo"))
+internal static class Program
 {
-    if (builder.Configuration.GetValue<bool>("Graph:Enabled"))
-        throw new InvalidOperationException("Demo and Graph cannot be enabled together.");
-    var now = DateTimeOffset.UtcNow;
-    app.Services.GetRequiredService<OfficeState>().Update(new("Available", "Available"),
-        [new(now.AddMinutes(6), now.AddMinutes(7))]);
+    [STAThread]
+    private static void Main(string[] args)
+    {
+        ApplicationConfiguration.Initialize();
+        using var identity = WindowsIdentity.GetCurrent();
+        using var instance = new Mutex(true, $@"Local\PresencePlus-{identity.User?.Value}", out var first);
+        if (!first)
+        {
+            MessageBox.Show("PresencePlus is already running. Open it from the notification area (including hidden tray icons).",
+                "PresencePlus", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        try
+        {
+            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "PresencePlus", "settings.json");
+            var store = new AppSettingsStore(path);
+            var settings = store.Load();
+            using var matter = new MatterOutput(Path.Combine(AppContext.BaseDirectory, "Matter"),
+                Path.Combine(Path.GetDirectoryName(path)!, "Matter"));
+            Application.Run(new MainForm(store, settings, new LedController(matter),
+                matter, args.Contains("--minimized", StringComparer.OrdinalIgnoreCase)));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+            JsonException or ArgumentException or InvalidOperationException or SecurityException)
+        {
+            MessageBox.Show($"PresencePlus could not start:\n\n{exception.Message}\n\nCheck %LOCALAPPDATA%\\PresencePlus\\settings.json and folder access.",
+                "PresencePlus", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
 }
-app.MapGet("/", (OfficeState state) => Results.Json(state.Current(DateTimeOffset.UtcNow)));
-app.MapPost("/graph/notifications", GraphNotifications.ReceiveAsync);
-app.Run();
