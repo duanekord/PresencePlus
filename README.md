@@ -28,8 +28,8 @@ approval; these are previews, not a claim that the changes are already on `main`
 
 1. Extract the entire ZIP into a permanent folder you can write to, such as
    `%LOCALAPPDATA%\PresencePlus\app`.
-2. Run **PresencePlus.exe** from that folder. Keep the `Matter` folder and all DLLs
-   beside it; the executable is not a standalone single file.
+2. Run **PresencePlus.exe** from that folder. Keep the `Matter` folder beside it;
+   the complete app is not a standalone executable.
 3. Follow the pairing walkthrough below, then choose a status.
 
 The portable download includes **.NET**, which runs the Windows interface, and
@@ -126,7 +126,7 @@ attestation; normal light-control commands are sent over the local network.
 | Wi-Fi setup fails | Check SSID/password and the light's supported band, commonly 2.4 GHz. |
 | Retrying / reconnect timeout | Check power, PC/light LAN reachability, IPv6, multicast, guest isolation, VPNs, and relevant network policy. Hover for details; **Reconnect** retries immediately. |
 | Attestation fails | Ensure internet access to CSA's production certificate service. Verification is intentionally not bypassed. |
-| Runtime missing / app will not start | Extract the whole release ZIP, not just the executable or the source ZIP. Keep all files together. |
+| Runtime missing / app will not start | Extract the whole release ZIP, not just the executable or the source ZIP. Keep the `Matter` folder beside the executable. |
 | Already running | Open the existing instance from the notification area, including hidden tray icons. |
 | Preferences cannot load | Review the startup error and `%LOCALAPPDATA%\PresencePlus\settings.json`; invalid values are surfaced instead of silently discarded. |
 | Paired light still on after Exit | Expected: Exit stops control, not the light. Choose **Off** and wait for **Connected** first. |
@@ -239,11 +239,58 @@ production dependencies. It does not install Node globally or replace Bluetooth
 drivers. Supply `-NodeDirectory 'C:\path\to\node-v24.22.2-win-x64'` to reuse a trusted
 full Node distribution, including npm.
 
-The default publish is **self-contained** for `win-x64`. Developers can opt into
-`-FrameworkDependent` for a smaller app that requires the .NET 10 Desktop Runtime.
+The default publish is **self-contained** for `win-x64`. Its managed desktop
+runtime is consolidated into `PresencePlus.exe` without trimming. Matter
+JavaScript is bundled into a few modules with lazy platform imports; only the
+Windows x64 Bluetooth native addon and its explicitly listed runtime assets are
+shipped. Node.js stays in the external `Matter` folder. This avoids extracting
+thousands of individual dependency files while retaining both runtimes.
+
+Developers can opt into `-FrameworkDependent` for a smaller app that requires the
+.NET 10 Desktop Runtime. `-Unbundled` on `Publish.ps1` or `Package.ps1` produces
+the larger, original-style dependency layout for troubleshooting and comparison.
+Use a fresh output folder when switching between layouts; publishing over an
+old folder does not remove obsolete dependency files.
+
 A plain `dotnet build` does not package the helper. Packaging always uses a fresh
 staging folder, never your installed app or user-data folder; it includes runtime
 and dependency license notices, but no personal settings or controller fabric.
+Compact packages are limited to **100 files**. Packaging checks Windows Forms
+startup, the actual native Bluetooth load path, fresh controller storage, IPC,
+and helper shutdown; CI repeats these checks after extracting the final ZIP.
+
+### Extraction measurements
+
+On the development PC, three alternating extractions into fresh folders produced:
+
+| Metric | Original ZIP | Compact ZIP |
+|---|---:|---:|
+| Files | 7,463 | 71 |
+| Download size | 97.2 MiB | 81.1 MiB |
+| Extraction range | 31.1-39.3 seconds | 1.4-3.3 seconds |
+| Median extraction | 33.8 seconds | 1.5 seconds |
+
+That is about **99% fewer files** and **96% lower median extraction time** in
+this benchmark. Measurements used .NET's ZIP extraction API with security
+settings unchanged, not Windows Explorer. OS/security caches were not reset;
+the user's reported ten-minute Explorer extraction is not a comparable baseline.
+Explorer and other PCs may give different results.
+
+The compact Windows-runtime/form-load check took 2.4-2.9 seconds on first launch
+and 0.4-0.6 seconds on repeat launch, with no files written to the designated
+bundle-extraction directory. This check excludes light discovery/reconnect and is
+not a full UI-readiness measurement. A separate same-source comparison against
+an unbundled desktop publish measured 2.0 seconds versus 1.7 seconds initially,
+then approximately 0.5 seconds for both layouts. No meaningful runtime-startup
+regression was observed in those samples; this is not a controlled cold-cache test.
+
+To reproduce the automated comparison (results are written under `artifacts`):
+
+```powershell
+.\scripts\Measure-Package.ps1 `
+    -BaselineArchive .\artifacts\packages\PresencePlus-0.1.0-win-x64.zip `
+    -Archive .\artifacts\packages\PresencePlus-0.2.0-rc.1-win-x64.zip
+```
 
 GitHub Actions runs checks and creates downloadable workflow artifacts on pull
 requests and pushes to `main`. Publishing a version tag from reviewed `main`
@@ -262,7 +309,8 @@ apply: a successful build does not replace a required approving review.
 
 The project has not yet selected an open-source license. Third-party components
 retain their own licenses, included in the download's `licenses` directory,
-`Matter` package directories, and `THIRD-PARTY-NOTICES.txt`.
+`Matter\licenses`, `Matter\NODE-LICENSE.txt`, and `THIRD-PARTY-NOTICES.txt`.
+`Matter\DEPENDENCIES.json` records bundled dependency versions and notice paths.
 
 ## Development checks
 

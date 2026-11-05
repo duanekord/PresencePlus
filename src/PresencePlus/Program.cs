@@ -10,6 +10,13 @@ internal static class Program
     private static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
+        if (args is ["--check-package"])
+        {
+            using var form = new StatusColorsForm(new AppSettings());
+            _ = form.Handle;
+            Console.WriteLine("PresencePlus Windows runtime loaded.");
+            return;
+        }
         using var identity = WindowsIdentity.GetCurrent();
         using var instance = new Mutex(true, $@"Local\PresencePlus-{identity.User?.Value}", out var first);
         if (!first)
