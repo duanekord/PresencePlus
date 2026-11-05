@@ -1,5 +1,6 @@
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
+using Microsoft.Win32;
 using PresencePlus;
 
 try
@@ -91,6 +92,45 @@ try
     Throws<ArgumentException>(() => palette.WithStatusColor("Unknown", "#123456"), "unknown palette status rejected");
     Throws<ArgumentException>(() => palette.WithStatusColor("Offline", "#FFFFFF"), "Off cannot become a colored on command");
     Equal("#000000", palette.ColorFor("Offline"), "Off retains actual power-off color");
+
+    var startupKeyPath = $@"Software\PresencePlus.Checks\Startup-{Guid.NewGuid():N}";
+    try
+    {
+        using var startupKey = Registry.CurrentUser.CreateSubKey(startupKeyPath);
+        const string oldExecutable = @"C:\Old app\PresencePlus.exe";
+        const string newExecutable = @"C:\New app 2\PresencePlus.exe";
+        Equal(false, LoginStartup.RefreshEnabled(null, newExecutable), "missing registry key does not enable startup");
+        Equal(false, LoginStartup.RefreshEnabled(startupKey, newExecutable), "first launch preserves startup opt-out");
+        Equal<object?>(null, startupKey.GetValue("PresencePlus"), "first launch does not create startup entry");
+        LoginStartup.SetEnabled(startupKey, true, oldExecutable);
+        Equal($"\"{oldExecutable}\" --minimized", startupKey.GetValue("PresencePlus"), "startup quotes executable paths with spaces");
+        Equal(true, LoginStartup.IsEnabled(startupKey, oldExecutable), "startup recognizes registered executable");
+        Equal(false, LoginStartup.IsEnabled(startupKey, newExecutable), "stale path is not shown as enabled for new copy");
+        Equal(true, LoginStartup.RefreshEnabled(startupKey, newExecutable), "launching moved copy preserves existing startup choice");
+        Equal($"\"{newExecutable}\" --minimized", startupKey.GetValue("PresencePlus"), "launching moved copy replaces old startup path");
+        Equal(true, LoginStartup.IsEnabled(startupKey, newExecutable), "startup points to moved copy");
+        Equal(true, LoginStartup.RefreshEnabled(startupKey, newExecutable), "repeat launch retains startup");
+        Equal(true, LoginStartup.IsEnabled(startupKey, newExecutable.ToUpperInvariant()), "startup path comparison ignores case");
+        foreach (var executable in new string?[] { null, "PresencePlus.exe", @"C:\Tools\dotnet.exe" })
+        {
+            Throws<InvalidOperationException>(() => LoginStartup.RefreshEnabled(startupKey, executable), "invalid launch host cannot replace startup");
+            Equal($"\"{newExecutable}\" --minimized", startupKey.GetValue("PresencePlus"), "invalid host preserves existing startup entry");
+        }
+        LoginStartup.SetEnabled(startupKey, false, newExecutable);
+        Equal(false, LoginStartup.RefreshEnabled(startupKey, oldExecutable), "launching another copy respects disabled startup");
+        Equal<object?>(null, startupKey.GetValue("PresencePlus"), "disabled startup stays removed");
+        LoginStartup.SetEnabled(startupKey, true, newExecutable);
+        Equal(true, LoginStartup.IsEnabled(startupKey, newExecutable), "explicit enable uses current executable");
+        using var readOnlyStartupKey = Registry.CurrentUser.OpenSubKey(startupKeyPath) ??
+            throw new InvalidOperationException("Startup test registry key is missing.");
+        Equal(true, LoginStartup.RefreshEnabled(readOnlyStartupKey, newExecutable), "current registration needs no write on repeat launch");
+        Throws<UnauthorizedAccessException>(() => LoginStartup.RefreshEnabled(readOnlyStartupKey, oldExecutable), "startup repair permission failure surfaces");
+        Equal($"\"{newExecutable}\" --minimized", startupKey.GetValue("PresencePlus"), "failed repair preserves previous registration");
+    }
+    finally
+    {
+        Registry.CurrentUser.DeleteSubKeyTree(startupKeyPath, throwOnMissingSubKey: false);
+    }
 
     var directory = Path.Combine(Path.GetTempPath(), $"PresencePlus-checks-{Guid.NewGuid():N}");
     var path = Path.Combine(directory, "settings.json");

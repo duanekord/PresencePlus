@@ -1,6 +1,9 @@
 using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.Win32;
+
+[assembly: InternalsVisibleTo("PresencePlus.Checks")]
 
 namespace PresencePlus;
 
@@ -83,20 +86,50 @@ public static class LoginStartup
     public static bool IsEnabled()
     {
         using var key = Registry.CurrentUser.OpenSubKey(Key);
-        return key?.GetValue(Name) is string;
+        return IsEnabled(key, Environment.ProcessPath);
+    }
+
+    internal static bool IsEnabled(RegistryKey? key, string? executable) =>
+        IsAppExecutable(executable) &&
+        string.Equals(key?.GetValue(Name) as string, CommandFor(executable), StringComparison.OrdinalIgnoreCase);
+
+    public static bool RefreshEnabled()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(Key, writable: true);
+        return RefreshEnabled(key, Environment.ProcessPath);
+    }
+
+    internal static bool RefreshEnabled(RegistryKey? key, string? executable)
+    {
+        if (key?.GetValue(Name) is not string) return false;
+        if (!IsEnabled(key, executable)) SetEnabled(key, true, executable);
+        return true;
     }
 
     public static void SetEnabled(bool enabled)
     {
         using var key = Registry.CurrentUser.CreateSubKey(Key);
+        SetEnabled(key, enabled, Environment.ProcessPath);
+    }
+
+    internal static void SetEnabled(RegistryKey key, bool enabled, string? executable)
+    {
         if (!enabled)
         {
             key.DeleteValue(Name, false);
             return;
         }
-        var executable = Environment.ProcessPath;
-        if (executable is null || !Path.GetFileName(executable).Equals("PresencePlus.exe", StringComparison.OrdinalIgnoreCase))
+        key.SetValue(Name, CommandFor(executable), RegistryValueKind.String);
+    }
+
+    private static bool IsAppExecutable(string? executable) =>
+        executable is not null && Path.IsPathFullyQualified(executable) &&
+        Path.GetFileName(executable).Equals("PresencePlus.exe", StringComparison.OrdinalIgnoreCase);
+
+    private static string CommandFor(string? executable)
+    {
+        if (!IsAppExecutable(executable))
             throw new InvalidOperationException("Publish PresencePlus to a permanent folder and run PresencePlus.exe before enabling Windows startup.");
-        key.SetValue(Name, $"\"{executable}\" --minimized", RegistryValueKind.String);
+        return $"\"{executable}\" --minimized";
     }
 }

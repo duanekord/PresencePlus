@@ -28,6 +28,7 @@ internal static class Program
 
         try
         {
+            LoginStartup.RefreshEnabled();
             var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "PresencePlus", "settings.json");
             var store = new AppSettingsStore(path);
@@ -40,7 +41,7 @@ internal static class Program
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
             JsonException or ArgumentException or InvalidOperationException or SecurityException)
         {
-            MessageBox.Show($"PresencePlus could not start:\n\n{exception.Message}\n\nCheck %LOCALAPPDATA%\\PresencePlus\\settings.json and folder access.",
+            MessageBox.Show($"PresencePlus could not start:\n\n{exception.Message}\n\nCheck %LOCALAPPDATA%\\PresencePlus\\settings.json, folder access, and Windows startup permissions.",
                 "PresencePlus", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
