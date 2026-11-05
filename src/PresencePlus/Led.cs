@@ -1,57 +1,49 @@
-using System.Net.Http.Json;
-
 namespace PresencePlus;
 
 public interface ILedOutput
 {
+    bool IsRunning { get; }
+    long ConnectionVersion { get; }
     Task SetAsync(LedState state, CancellationToken cancellationToken);
 }
 
-public sealed class ConsoleLed(ILogger<ConsoleLed> logger) : ILedOutput
-{
-    public Task SetAsync(LedState state, CancellationToken cancellationToken)
-    {
-        logger.LogInformation("LED: {Status} {Color} {Effect}", state.Status, state.Color, state.Effect);
-        return Task.CompletedTask;
-    }
-}
+public enum LightConnectionState { Connecting, Connected, Updating, Retrying, NotPaired, Unavailable }
 
-public sealed class WifiLed(HttpClient client, IConfiguration configuration) : ILedOutput
+public sealed class LedController(ILedOutput output, TimeProvider? timeProvider = null)
 {
-    public async Task SetAsync(LedState state, CancellationToken cancellationToken)
-    {
-        using var request = new HttpRequestMessage(HttpMethod.Put, configuration["Led:Url"]);
-        request.Content = JsonContent.Create(state);
-        if (configuration["Led:ApiKey"] is { Length: > 0 } key)
-            request.Headers.Add("X-Api-Key", key);
-        using var response = await client.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
-    }
-}
+    private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
+    private AppSettings settings = new();
+    private long revision;
+    private long deliveredRevision = -1;
+    private long deliveredConnection = -1;
+    private DateTimeOffset deliveredAt = DateTimeOffset.MinValue;
 
-public sealed class LedWorker(OfficeState state, ILedOutput output, ILogger<LedWorker> logger) : BackgroundService
-{
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public void Configure(AppSettings value)
     {
-        LedState? previous = null;
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
-        do
-        {
-            var current = state.Current(DateTimeOffset.UtcNow);
-            if (current == previous) continue;
-            try
-            {
-                await output.SetAsync(current, stoppingToken);
-                previous = current;
-            }
-            catch (HttpRequestException)
-            {
-                logger.LogWarning("LED device unavailable; retrying on the next tick.");
-            }
-            catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
-            {
-                logger.LogWarning("LED device timed out; retrying on the next tick.");
-            }
-        } while (await timer.WaitForNextTickAsync(stoppingToken));
+        value.Validate();
+        var changed = settings.GetLedState() != value.GetLedState();
+        settings = value;
+        if (changed) revision++;
+    }
+
+    public void Retry() => deliveredRevision = -1;
+
+    public async Task<LightConnectionState> SynchronizeAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var current = settings;
+        var sendingRevision = revision;
+        // Periodic reassertion detects device restarts even when no status changes.
+        if (deliveredRevision == sendingRevision && output.IsRunning &&
+            deliveredConnection == output.ConnectionVersion && clock.GetUtcNow() - deliveredAt < TimeSpan.FromSeconds(30))
+            return LightConnectionState.Connected;
+
+        await output.SetAsync(current.GetLedState(), cancellationToken);
+        deliveredRevision = sendingRevision;
+        deliveredConnection = output.ConnectionVersion;
+        deliveredAt = clock.GetUtcNow();
+        return sendingRevision == revision
+            ? LightConnectionState.Connected
+            : LightConnectionState.Updating;
     }
 }

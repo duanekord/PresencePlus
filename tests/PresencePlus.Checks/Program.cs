@@ -1,277 +1,413 @@
-using System.Text;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using PresencePlus;
-using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Http.HttpResults;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Identity.Client;
 
-var checks = 0;
-void Equal<T>(T expected, T actual, string name)
+try
 {
-    if (!EqualityComparer<T>.Default.Equals(expected, actual))
-        throw new InvalidOperationException($"{name}: expected {expected}, got {actual}");
-    checks++;
-}
-
-var now = new DateTimeOffset(2026, 11, 4, 12, 0, 0, TimeSpan.Zero);
-var available = new Presence("Available", "Available");
-LedState Evaluate(Presence p, params Meeting[] meetings) => StatusRules.Evaluate(p, meetings, now);
-Meeting In(TimeSpan delay) => new(now + delay, now + delay + TimeSpan.FromMinutes(30));
-
-foreach (var (availability, expected) in new[]
-{
-    ("Available", "Available"), ("Busy", "Busy"), ("DoNotDisturb", "DoNotDisturb"),
-    ("Away", "Away"), ("BeRightBack", "Away"), ("Offline", "Offline"), ("PresenceUnknown", "Unknown")
-})
-    Equal(expected, Evaluate(new(availability, "Unknown")).Status, availability);
-Equal("Presenting", Evaluate(new("DoNotDisturb", "Presenting")).Status, "presenting priority");
-foreach (var activity in new[] { "InAMeeting", "InACall", "InAConferenceCall" })
-    Equal("InMeeting", Evaluate(new("Busy", activity)).Status, activity);
-Equal("Available", Evaluate(available, In(TimeSpan.FromMinutes(5) + TimeSpan.FromTicks(1))).Status, "before five minutes");
-Equal("MeetingInFiveMinutes", Evaluate(available, In(TimeSpan.FromMinutes(5))).Status, "five minute boundary");
-Equal("pulse", Evaluate(available, In(TimeSpan.FromMinutes(2))).Effect, "five minute effect");
-Equal("MeetingInFiveMinutes", Evaluate(available, In(TimeSpan.FromMinutes(1) + TimeSpan.FromTicks(1))).Status, "before one minute");
-Equal("MeetingInOneMinute", Evaluate(available, In(TimeSpan.FromMinutes(1))).Status, "one minute boundary");
-Equal("pulse-fast", Evaluate(available, In(TimeSpan.FromSeconds(1))).Effect, "one minute effect");
-Equal("InMeeting", Evaluate(available, In(TimeSpan.Zero)).Status, "meeting start");
-Equal("Available", Evaluate(available, new Meeting(now.AddMinutes(-30), now)).Status, "meeting end");
-Equal("Available", Evaluate(available, new Meeting(now.AddMinutes(1), now)).Status, "invalid event");
-Equal("InMeeting", Evaluate(available, In(TimeSpan.FromMinutes(1)), In(TimeSpan.FromMinutes(-1))).Status, "overlap");
-Equal("DoNotDisturb", Evaluate(new("DoNotDisturb", "Unknown"), In(TimeSpan.FromMinutes(1))).Status, "DND priority");
-Equal("Presenting", Evaluate(new("Busy", "Presenting"), In(TimeSpan.FromMinutes(1))).Status, "presenting over reminder");
-Equal("MeetingInOneMinute", Evaluate(available, In(TimeSpan.FromMinutes(4)), In(TimeSpan.FromSeconds(45))).Status, "nearest event");
-Equal("#00FF00", Evaluate(available).Color, "available color");
-Equal("#000000", Evaluate(new("Offline", "Offline")).Color, "offline color");
-
-var state = new OfficeState();
-Equal("Unknown", state.Current(now).Status, "startup");
-state.Update(available, [In(TimeSpan.FromMinutes(5))]);
-Equal("MeetingInFiveMinutes", state.Current(now).Status, "cached calendar");
-Equal("MeetingInOneMinute", state.Current(now.AddMinutes(4)).Status, "local countdown");
-Equal("InMeeting", state.Current(now.AddMinutes(5)).Status, "local start");
-Equal("Available", state.Current(now.AddMinutes(35)).Status, "local end");
-state.Update(available, []);
-Equal("Available", state.Current(now).Status, "calendar deletion");
-
-using var utc = JsonDocument.Parse("""{"dateTime":"2026-11-04T12:00:00.0000000","timeZone":"UTC"}""");
-Equal(now, GraphWorker.ParseUtc(utc.RootElement), "Graph UTC time");
-
-var notifications = new GraphNotifications();
-notifications.Register("subscription", "expected-state");
-Equal(true, notifications.Accept("subscription", "expected-state"), "valid subscription");
-Equal(false, notifications.Accept("other", "expected-state"), "unknown subscription");
-Equal(false, notifications.Accept("subscription", "wrong-state"), "invalid client state");
-
-async Task<IResult> Receive(string body, string query = "")
-{
-    var context = new DefaultHttpContext();
-    context.Request.QueryString = new QueryString(query);
-    context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(body));
-    return await GraphNotifications.ReceiveAsync(context.Request, notifications);
-}
-var validation = (ContentHttpResult)await Receive("", "?validationToken=hello%2Bworld");
-Equal("hello+world", validation.ResponseContent, "validation token decoded once");
-Equal("text/plain", validation.ContentType, "validation content type");
-Equal(true, await Receive("{") is BadRequest, "malformed JSON");
-Equal(true, await Receive("{}") is BadRequest, "missing array");
-Equal(true, await Receive("[]") is BadRequest, "invalid root");
-Equal(true, await Receive("""{"value":[null]}""") is UnauthorizedHttpResult, "invalid item");
-Equal(true, await Receive("""{"value":[{"subscriptionId":"subscription","clientState":"wrong"}]}""") is UnauthorizedHttpResult, "reject forged webhook");
-Equal(false, notifications.TakeSignal(), "forged webhook not queued");
-Equal(true, await Receive("""{"value":[{"subscriptionId":"subscription","clientState":"expected-state"}]}""") is Accepted, "accept webhook");
-Equal(true, notifications.TakeSignal(), "valid webhook queued");
-notifications.Signal();
-notifications.Signal();
-Equal(true, notifications.TakeSignal(), "coalesced notification");
-Equal(false, notifications.TakeSignal(), "duplicate coalesced");
-Equal(true, await Receive("""{"value":[{"subscriptionId":"subscription","clientState":"expected-state"},{"subscriptionId":"stale","clientState":"stale"}]}""") is Accepted, "mixed notification batch");
-Equal(true, notifications.TakeSignal(), "valid entry survives stale entry");
-notifications.Remove("subscription");
-Equal(false, notifications.Accept("subscription", "expected-state"), "removed subscription");
-
-var handler = new DeviceHandler();
-using var client = new HttpClient(handler);
-var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
-{
-    ["Led:Url"] = "https://device.test/led"
-}).Build();
-await new WifiLed(client, configuration).SetAsync(new("Available", "#00FF00"), CancellationToken.None);
-Equal(HttpMethod.Put, handler.Method, "device HTTP method");
-Equal("https://device.test/led", handler.Url, "device URL");
-using var payload = JsonDocument.Parse(handler.Body!);
-Equal("Available", payload.RootElement.GetProperty("status").GetString(), "device status");
-Equal("#00FF00", payload.RootElement.GetProperty("color").GetString(), "device color");
-Equal("solid", payload.RootElement.GetProperty("effect").GetString(), "device effect");
-
-async Task<TException> ThrowsAsync<TException>(Func<Task> action, string name) where TException : Exception
-{
-    try { await action(); }
-    catch (TException exception)
+    if (args.Length == 2 && args[0] == "--screenshots")
     {
+        DocumentationScreenshots.Capture(Path.GetFullPath(args[1]));
+        return;
+    }
+
+    if (args.Length >= 2 && args[0] == "--hardware")
+    {
+        var data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PresencePlus");
+        var saved = new AppSettingsStore(Path.Combine(data, "settings.json")).Load();
+        using var hardware = new MatterOutput(Path.GetFullPath(args[1]), Path.Combine(data, "Matter"));
+        var device = await hardware.InspectAsync(CancellationToken.None);
+        if (!device.Paired) throw new InvalidOperationException("Hardware check requires an existing pairing.");
+        Console.WriteLine($"Reconnected: {device.Name}, endpoint {device.Endpoint}");
+        try
+        {
+            foreach (var status in StatusOptions.All)
+            {
+                var state = (saved with { Status = status.Id }).GetLedState();
+                await hardware.SetAsync(state, CancellationToken.None);
+                Console.WriteLine($"Matter acknowledged {status.Label}: {state.Color}");
+                await Task.Delay(750);
+            }
+            var customColorState = (saved with { Status = "Available" }).WithStatusColor("Available", "#3366FF");
+            await hardware.SetAsync(customColorState.GetLedState(), CancellationToken.None);
+            Console.WriteLine("Matter acknowledged custom color #3366FF.");
+            await Task.Delay(750);
+        }
+        finally
+        {
+            await hardware.SetAsync(saved.GetLedState(), CancellationToken.None);
+        }
+        Console.WriteLine("Saved selection restored.");
+        return;
+    }
+
+    var checks = 0;
+    void Equal<T>(T expected, T actual, string name)
+    {
+        if (!EqualityComparer<T>.Default.Equals(expected, actual))
+            throw new InvalidOperationException($"{name}: expected {expected}, got {actual}");
         checks++;
-        return exception;
     }
-    throw new InvalidOperationException($"{name}: expected {typeof(TException).Name}");
-}
 
-var clock = new CheckClock(now);
-GraphTokenProvider Provider(CheckAuthentication authentication) =>
-    new(authentication, clock, NullLogger<GraphTokenProvider>.Instance);
-GraphAccessToken Token(string access = "first-access", string account = "tenant/account", int minutes = 60) =>
-    new(access, clock.GetUtcNow().AddMinutes(minutes), account);
-Task<GraphAccessToken> NeedsInteraction(CancellationToken _) =>
-    Task.FromException<GraphAccessToken>(new MsalUiRequiredException("interaction_required", "Test sign-in required."));
+    void Throws<TException>(Action action, string name) where TException : Exception
+    {
+        try { action(); }
+        catch (TException) { checks++; return; }
+        throw new InvalidOperationException($"{name}: expected {typeof(TException).Name}");
+    }
 
-var silent = new CheckAuthentication();
-silent.Silent.Enqueue(_ => Task.FromResult(Token(minutes: 3)));
-silent.Silent.Enqueue(_ => Task.FromResult(Token("refreshed-access")));
-silent.Silent.Enqueue(_ => Task.FromResult(Token("other-access", "tenant/other-account")));
-var tokenProvider = Provider(silent);
-Equal("first-access", await tokenProvider.GetAsync(CancellationToken.None), "silent startup");
-Equal(1, tokenProvider.SignInVersion, "silent startup initializes identity");
-Equal("first-access", await tokenProvider.GetAsync(CancellationToken.None), "cached access token");
-Equal(1, silent.SilentCalls, "cached token avoids broker calls");
-clock.Advance(TimeSpan.FromMinutes(1));
-Equal("refreshed-access", await tokenProvider.GetAsync(CancellationToken.None), "refresh at two-minute boundary");
-Equal(1, tokenProvider.SignInVersion, "silent refresh preserves identity");
-clock.Advance(TimeSpan.FromHours(1));
-Equal("other-access", await tokenProvider.GetAsync(CancellationToken.None), "silent account change");
-Equal(2, tokenProvider.SignInVersion, "silent account change invalidates Graph identity");
-Equal(0, silent.InteractiveCalls, "silent success never opens sign-in UI");
+    async Task ThrowsAsync<TException>(Func<Task> action, string name) where TException : Exception
+    {
+        try { await action(); }
+        catch (TException) { checks++; return; }
+        throw new InvalidOperationException($"{name}: expected {typeof(TException).Name}");
+    }
 
-var interactive = new CheckAuthentication();
-interactive.Silent.Enqueue(NeedsInteraction);
-interactive.Interactive.Enqueue(_ => Task.FromResult(Token(minutes: 3)));
-interactive.Silent.Enqueue(NeedsInteraction);
-interactive.Interactive.Enqueue(_ => Task.FromResult(Token("second-access")));
-tokenProvider = Provider(interactive);
-Equal("first-access", await tokenProvider.GetAsync(CancellationToken.None), "broker interactive fallback");
-Equal(1, tokenProvider.SignInVersion, "initial interactive account version");
-Equal(1, interactive.InteractiveCalls, "interactive fallback only when required");
-clock.Advance(TimeSpan.FromMinutes(1));
-Equal("second-access", await tokenProvider.GetAsync(CancellationToken.None), "broker reauthentication");
-Equal(2, tokenProvider.SignInVersion, "reauthentication invalidates cached identity");
-Equal("second-access", await tokenProvider.GetAsync(CancellationToken.None), "cached interactive access token");
-Equal(2, tokenProvider.SignInVersion, "cached access preserves identity version");
-
-var restarted = new CheckAuthentication();
-restarted.Silent.Enqueue(_ => Task.FromResult(Token("restart-access")));
-Equal("restart-access", await Provider(restarted).GetAsync(CancellationToken.None), "restart can reuse broker sign-in silently");
-Equal(0, restarted.InteractiveCalls, "restart does not force interactive sign-in");
-
-var failing = new CheckAuthentication();
-failing.Silent.Enqueue(_ => Task.FromException<GraphAccessToken>(new MsalServiceException("temporarily_unavailable", "Test outage.")));
-tokenProvider = Provider(failing);
-var failure = await ThrowsAsync<InvalidOperationException>(() => tokenProvider.GetAsync(CancellationToken.None), "broker errors surface");
-Equal(true, failure.InnerException is MsalServiceException, "preserve broker error for diagnostics");
-Equal(0, failing.InteractiveCalls, "network errors do not trigger interactive sign-in");
-Equal(0, tokenProvider.SignInVersion, "failed authentication preserves identity version");
-
-var canceledPrompt = new CheckAuthentication();
-canceledPrompt.Silent.Enqueue(NeedsInteraction);
-canceledPrompt.Silent.Enqueue(NeedsInteraction);
-canceledPrompt.Silent.Enqueue(NeedsInteraction);
-canceledPrompt.Interactive.Enqueue(_ => Task.FromException<GraphAccessToken>(new MsalClientException("authentication_canceled", "Test cancellation.")));
-canceledPrompt.Interactive.Enqueue(_ => Task.FromResult(Token("retry-access")));
-tokenProvider = Provider(canceledPrompt);
-await ThrowsAsync<InvalidOperationException>(() => tokenProvider.GetAsync(CancellationToken.None), "canceled broker prompt surfaces");
-await ThrowsAsync<InvalidOperationException>(() => tokenProvider.GetAsync(CancellationToken.None), "failed prompt cooldown");
-Equal(1, canceledPrompt.InteractiveCalls, "failed prompt does not reopen on every Graph retry");
-clock.Advance(TimeSpan.FromMinutes(5));
-Equal("retry-access", await tokenProvider.GetAsync(CancellationToken.None), "interactive retry after cooldown");
-Equal(2, canceledPrompt.InteractiveCalls, "prompt resumes after cooldown");
-Equal(1, tokenProvider.SignInVersion, "only successful interactive sign-in updates identity");
-
-var invalid = new CheckAuthentication();
-invalid.Silent.Enqueue(_ => Task.FromResult(Token(access: "")));
-invalid.Silent.Enqueue(_ => Task.FromResult(Token(account: "")));
-invalid.Silent.Enqueue(_ => Task.FromResult(Token(minutes: 0)));
-tokenProvider = Provider(invalid);
-await ThrowsAsync<InvalidOperationException>(() => tokenProvider.GetAsync(CancellationToken.None), "reject empty access token");
-await ThrowsAsync<InvalidOperationException>(() => tokenProvider.GetAsync(CancellationToken.None), "reject missing account");
-await ThrowsAsync<InvalidOperationException>(() => tokenProvider.GetAsync(CancellationToken.None), "reject expired token");
-Equal(0, tokenProvider.SignInVersion, "invalid token never updates identity");
-
-using var canceled = new CancellationTokenSource();
-canceled.Cancel();
-await ThrowsAsync<OperationCanceledException>(() => tokenProvider.GetAsync(canceled.Token), "pre-canceled request");
-Equal(3, invalid.SilentCalls, "pre-canceled request never contacts broker");
-var cancellation = new CheckAuthentication();
-cancellation.Silent.Enqueue(token => Task.FromCanceled<GraphAccessToken>(new CancellationToken(true)));
-tokenProvider = Provider(cancellation);
-await ThrowsAsync<OperationCanceledException>(() => tokenProvider.GetAsync(CancellationToken.None), "silent cancellation propagates");
-Equal(0, cancellation.InteractiveCalls, "silent cancellation never opens UI");
-
-using var forwardedCancellation = new CancellationTokenSource();
-var forwarding = new CheckAuthentication();
-forwarding.Silent.Enqueue(token =>
-{
-    Equal(forwardedCancellation.Token, token, "silent cancellation token forwarded");
-    return NeedsInteraction(token);
-});
-forwarding.Interactive.Enqueue(token =>
-{
-    Equal(forwardedCancellation.Token, token, "interactive cancellation token forwarded");
-    return Task.FromCanceled<GraphAccessToken>(new CancellationToken(true));
-});
-await ThrowsAsync<OperationCanceledException>(() => Provider(forwarding).GetAsync(forwardedCancellation.Token), "interactive cancellation propagates");
-
-var graphConfiguration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
-{
-    ["Graph:TenantId"] = "11111111-1111-1111-1111-111111111111",
-    ["Graph:ClientId"] = "22222222-2222-2222-2222-222222222222",
-    ["Graph:NotificationUrl"] = "https://example.test/graph/notifications"
-}).Build();
-GraphOptions.Validate(graphConfiguration);
-if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 15063) && Environment.UserInteractive)
-{
-    _ = new WindowsBrokerAuthentication(graphConfiguration);
+    Equal(7, StatusOptions.All.Count, "seven manual statuses");
+    foreach (var (id, label, color) in new[]
+    {
+    ("Available", "Available", "#00FF00"), ("Busy", "Busy", "#FF8000"),
+    ("DoNotDisturb", "Do not disturb", "#FF0000"), ("InMeeting", "In a meeting", "#FF0000"),
+    ("Presenting", "Presenting", "#800080"), ("Away", "Away", "#FFFF00"),
+    ("Offline", "Off", "#000000")
+})
+    {
+        var status = StatusOptions.Get(id);
+        Equal(label, status.Label, $"{id} label");
+        Equal(new LedState(id, color), status.Led, $"{id} Matter state");
+    }
+    Throws<ArgumentException>(() => StatusOptions.Get("not-a-status"), "invalid status is rejected");
+    Throws<ArgumentException>(() => new AppSettings { Status = "not-a-status" }.Validate(), "invalid saved status rejected");
+    foreach (var value in new[] { -1, 0, 101 })
+        Throws<ArgumentException>(() => new AppSettings { BrightnessPercent = value }.Validate(), "invalid brightness rejected");
+    new AppSettings().Validate();
     checks++;
-}
+    var palette = new AppSettings().WithStatusColor("Available", "#123abc").WithStatusColor("DoNotDisturb", "#315FFF");
+    Equal("#123ABC", palette.ColorFor("Available"), "custom colors normalized");
+    Equal("#00FF00", new AppSettings().ColorFor("Available"), "editing colors does not mutate defaults");
+    Equal("#FF0000", palette.ColorFor("InMeeting"), "similar default colors remain independently configurable");
+    Equal(new LedState("Available", "#123ABC"), palette.GetLedState(), "custom color used in light state");
+    foreach (var color in new[] { "red", "#123", "#GG0000", "123ABC", "#12345678", "#12345 " })
+        Throws<ArgumentException>(() => palette.WithStatusColor("Busy", color), "malformed color rejected");
+    Throws<ArgumentException>(() => palette.WithStatusColor("Unknown", "#123456"), "unknown palette status rejected");
+    Throws<ArgumentException>(() => palette.WithStatusColor("Offline", "#FFFFFF"), "Off cannot become a colored on command");
+    Equal("#000000", palette.ColorFor("Offline"), "Off retains actual power-off color");
 
-Console.WriteLine($"All {checks} PresencePlus checks passed.");
-
-sealed class DeviceHandler : HttpMessageHandler
-{
-    public HttpMethod? Method { get; private set; }
-    public string? Url { get; private set; }
-    public string? Body { get; private set; }
-
-    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    var directory = Path.Combine(Path.GetTempPath(), $"PresencePlus-checks-{Guid.NewGuid():N}");
+    var path = Path.Combine(directory, "settings.json");
+    try
     {
-        Method = request.Method;
-        Url = request.RequestUri!.ToString();
-        Body = await request.Content!.ReadAsStringAsync(cancellationToken);
-        return new HttpResponseMessage(System.Net.HttpStatusCode.OK);
+        var store = new AppSettingsStore(path);
+        Equal(new AppSettings(), store.Load(), "first launch defaults");
+        var saved = new AppSettings { Status = "Presenting", BrightnessPercent = 45, StartMinimized = true };
+        store.Save(saved);
+        Equal(saved, store.Load(), "settings and selection survive restart");
+        Equal(false, File.Exists(path + ".tmp"), "atomic save leaves no temporary file");
+        var replaced = saved with { Status = "Offline" };
+        store.Save(replaced);
+        Equal(replaced, store.Load(), "existing settings replaced");
+        Throws<ArgumentException>(() => store.Save(saved with { Status = "bad" }), "invalid save rejected");
+        Equal(replaced, store.Load(), "invalid save preserves previous settings");
+        store.Save(palette);
+        Equal("#123ABC", store.Load().ColorFor("Available"), "custom color survives restart");
+        Equal("#315FFF", store.Load().ColorFor("DoNotDisturb"), "multiple color overrides survive restart");
+        Equal("#FFFF00", store.Load().ColorFor("Away"), "missing overrides retain defaults");
+        File.WriteAllText(path, """{"Status":"Busy","LedUrl":"http://old-device.test/led","StartMinimized":true}""");
+        Equal(new AppSettings { Status = "Busy", StartMinimized = true }, store.Load(), "old URL ignored while preserving user choices");
+        File.WriteAllText(path, "{");
+        Throws<JsonException>(() => store.Load(), "malformed settings surfaced");
+        File.WriteAllText(path, "null");
+        Throws<InvalidDataException>(() => store.Load(), "empty settings surfaced");
+        File.WriteAllText(path, """{"Status":"bad"}""");
+        Throws<ArgumentException>(() => store.Load(), "unsupported saved status surfaced");
+        foreach (var json in new[]
+        {
+            """{"StatusColors":null}""",
+            """{"StatusColors":{"Available":null}}""",
+            """{"StatusColors":{"Available":"red"}}""",
+            """{"StatusColors":{"Unknown":"#112233"}}""",
+            """{"StatusColors":{"Offline":"#FFFFFF"}}"""
+        })
+        {
+            File.WriteAllText(path, json);
+            Throws<ArgumentException>(() => store.Load(), "invalid saved color map surfaced");
+        }
+        var privatePath = Path.Combine(directory, "private");
+        MatterOutput.EnsurePrivateStorage(privatePath);
+        Equal(true, new DirectoryInfo(privatePath).GetAccessControl().AreAccessRulesProtected, "fabric storage does not inherit broad permissions");
+        Directory.Delete(privatePath);
+    }
+    finally
+    {
+        if (File.Exists(path)) File.Delete(path);
+        if (Directory.Exists(directory)) Directory.Delete(directory);
     }
 
-}
+    var output = new FakeMatter();
+    var clock = new ManualClock();
+    var controller = new LedController(output, clock);
+    await controller.SynchronizeAsync(CancellationToken.None);
+    Equal(1, output.States.Count, "initial selection delivered");
+    await controller.SynchronizeAsync(CancellationToken.None);
+    Equal(1, output.States.Count, "unchanged state not resent on every timer tick");
+    controller.Configure(new() { StartMinimized = true });
+    await controller.SynchronizeAsync(CancellationToken.None);
+    Equal(1, output.States.Count, "UI preference changes do not resend");
+    controller.Configure(new() { Status = "Presenting" });
+    await controller.SynchronizeAsync(CancellationToken.None);
+    Equal("#800080", output.States[^1].Color, "manual selection changes color");
+    controller.Configure(new() { Status = "Presenting", BrightnessPercent = 50 });
+    await controller.SynchronizeAsync(CancellationToken.None);
+    Equal(50, output.States[^1].BrightnessPercent, "brightness delivered");
+    controller.Retry();
+    await controller.SynchronizeAsync(CancellationToken.None);
+    Equal(4, output.States.Count, "explicit resend reapplies current state");
 
-sealed class CheckClock(DateTimeOffset now) : TimeProvider
-{
-    private DateTimeOffset current = now;
-    public override DateTimeOffset GetUtcNow() => current;
-    public void Advance(TimeSpan amount) => current += amount;
-}
+    output.Failure = new MatterException("DeviceUnavailable", "Synthetic device offline.");
+    controller.Configure(new() { Status = "Busy" });
+    await ThrowsAsync<MatterException>(() => controller.SynchronizeAsync(CancellationToken.None), "device errors surface");
+    output.Failure = null;
+    await controller.SynchronizeAsync(CancellationToken.None);
+    Equal(6, output.States.Count, "failed writes retry without changing selection");
+    Equal("Busy", output.States[^1].Status, "retry sends intended selection");
 
-sealed class CheckAuthentication : IGraphAuthentication
-{
-    public Queue<Func<CancellationToken, Task<GraphAccessToken>>> Silent { get; } = new();
-    public Queue<Func<CancellationToken, Task<GraphAccessToken>>> Interactive { get; } = new();
-    public int SilentCalls { get; private set; }
-    public int InteractiveCalls { get; private set; }
+    output.Failure = new OperationCanceledException("Synthetic cancellation");
+    controller.Configure(new() { Status = "Away" });
+    await ThrowsAsync<OperationCanceledException>(() => controller.SynchronizeAsync(CancellationToken.None), "cancellation surfaces");
+    output.Failure = null;
+    await controller.SynchronizeAsync(CancellationToken.None);
+    Equal(8, output.States.Count, "canceled write retried");
 
-    public Task<GraphAccessToken> AcquireSilentAsync(CancellationToken cancellationToken)
+    var pending = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    output.Pending = pending.Task;
+    controller.Configure(new() { Status = "DoNotDisturb" });
+    var inFlight = controller.SynchronizeAsync(CancellationToken.None);
+    controller.Configure(new() { Status = "Offline" });
+    pending.SetResult();
+    Equal(LightConnectionState.Updating, await inFlight, "stale write not reported as latest selection");
+    output.Pending = null;
+    await controller.SynchronizeAsync(CancellationToken.None);
+    Equal(new LedState("Offline", "#000000"), output.States[^1], "newest choice wins after slow write");
+    output.ConnectionVersion++;
+    await controller.SynchronizeAsync(CancellationToken.None);
+    Equal(11, output.States.Count, "helper restart forces current selection delivery");
+    clock.Advance(TimeSpan.FromSeconds(31));
+    await controller.SynchronizeAsync(CancellationToken.None);
+    Equal(12, output.States.Count, "periodic reassertion recovers light restarts");
+    using var canceled = new CancellationTokenSource();
+    canceled.Cancel();
+    await ThrowsAsync<OperationCanceledException>(() => controller.SynchronizeAsync(canceled.Token), "shutdown cancellation honored");
+    Throws<ArgumentException>(() => controller.Configure(new() { BrightnessPercent = 0 }), "invalid controller settings rejected");
+    var colorsBefore = output.States.Count;
+    var custom = new AppSettings { Status = "Offline" };
+    custom = custom.WithStatusColor("Available", "#123ABC");
+    controller.Configure(custom);
+    await controller.SynchronizeAsync(CancellationToken.None);
+    Equal(colorsBefore, output.States.Count, "editing inactive status does not resend current selection");
+    controller.Configure(custom with { Status = "Available" });
+    Equal(LightConnectionState.Connected, await controller.SynchronizeAsync(CancellationToken.None), "acknowledged custom color is connected");
+    Equal("#123ABC", output.States[^1].Color, "selecting customized status uses saved color");
+    custom = (custom with { Status = "Available" }).WithStatusColor("Available", "#654321");
+    controller.Configure(custom);
+    await controller.SynchronizeAsync(CancellationToken.None);
+    Equal(colorsBefore + 2, output.States.Count, "editing active status resends even with same status and brightness");
+    Equal("#654321", output.States[^1].Color, "active color change reaches output");
+    var colorPending = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    output.Pending = colorPending.Task;
+    controller.Configure(custom.WithStatusColor("Available", "#010203"));
+    var pendingColor = controller.SynchronizeAsync(CancellationToken.None);
+    controller.Configure(custom.WithStatusColor("Available", "#AABBCC"));
+    colorPending.SetResult();
+    Equal(LightConnectionState.Updating, await pendingColor, "in-flight color changes tracked");
+    output.Pending = null;
+    await controller.SynchronizeAsync(CancellationToken.None);
+    Equal("#AABBCC", output.States[^1].Color, "latest custom color wins after slow write");
+    controller.Configure(new());
+    await controller.SynchronizeAsync(CancellationToken.None);
+    Equal("#00FF00", output.States[^1].Color, "resetting palette reapplies default color");
+    using (var missing = new MatterOutput(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")),
+        Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))))
     {
-        SilentCalls++;
-        return Silent.Dequeue()(cancellationToken);
+        await ThrowsAsync<MatterException>(() => missing.InspectAsync(CancellationToken.None), "missing helper produces actionable error");
+        Equal(false, missing.IsRunning, "missing helper never reported as running");
     }
 
-    public Task<GraphAccessToken> AcquireInteractiveAsync(string? claims, CancellationToken cancellationToken)
+    Exception? uiFailure = null;
+    var uiThread = new Thread(() =>
     {
-        InteractiveCalls++;
-        return Interactive.Dequeue()(cancellationToken);
+        var uiDirectory = Path.Combine(Path.GetTempPath(), $"PresencePlus-ui-checks-{Guid.NewGuid():N}");
+        var uiPath = Path.Combine(uiDirectory, "settings.json");
+        try
+        {
+            var store = new AppSettingsStore(uiPath);
+            var matter = new FakeMatter();
+            var led = new LedController(matter);
+            var uiSettings = new AppSettings().WithStatusColor("Presenting", "#123ABC");
+            using var form = new MainForm(store, uiSettings, led, matter, false);
+            Equal(7, StatusOptions.All.SelectMany(option => form.Controls.Find($"status-{option.Id}", true)).Count(),
+                "window exposes all status buttons");
+            Equal(1, form.Controls.Find("pair-light", true).Length, "Matter pairing control available");
+            Equal(1, form.Controls.Find("status-colors", true).Length, "color customization available");
+            Equal(0, FindControls(form).OfType<TextBox>().Count(field => field.Parent is not UpDownBase), "no LED URL input remains");
+            var menu = form.ContextMenuStrip ?? throw new InvalidOperationException("Status menu missing.");
+            var presenting = menu.Items.OfType<ToolStripMenuItem>().Single(item => item.Name == "tray-Presenting");
+            presenting.PerformClick();
+            Equal("Presenting", store.Load().Status, "tray selection persisted");
+            Equal(true, presenting.Checked, "tray selection checked");
+            Equal("Presenting (selected)", form.Controls.Find("status-Presenting", true).Single().AccessibleName,
+                "tray selection reflected in window");
+            led.SynchronizeAsync(CancellationToken.None).GetAwaiter().GetResult();
+            Equal("#123ABC", matter.States.Single().Color, "tray selection drives custom Matter output");
+            Equal(true, FindControls(form).Any(control => control.AccessibleName == "Presenting color #123ABC"),
+                "window swatch uses customized color");
+            using (var icon = (form.Icon ?? throw new InvalidOperationException("Status icon missing.")).ToBitmap())
+                Equal(ColorTranslator.FromHtml("#123ABC").ToArgb(), icon.GetPixel(icon.Width / 2, icon.Height / 2).ToArgb(),
+                    "status icon uses customized color");
+            using (var colors = new StatusColorsForm(uiSettings))
+            {
+                Equal(6, FindControls(colors).OfType<Button>().Count(button => button.Name.StartsWith("color-")),
+                    "each lit status has a color picker");
+                Equal("#123ABC", colors.Controls.Find("color-Presenting", true).Single().Text, "color picker previews saved palette");
+                Equal(0, colors.Controls.Find("color-Offline", true).Length, "Off stays a power action");
+                colors.Show();
+                Application.DoEvents();
+                foreach (var button in FindControls(colors).OfType<Button>())
+                    Equal(true, colors.ClientRectangle.Contains(colors.RectangleToClient(button.RectangleToScreen(button.ClientRectangle))),
+                        "palette controls fit within dialog");
+                Equal(Color.Black, colors.Controls.Find("color-Available", true).Single().ForeColor,
+                    "bright swatches have readable text");
+                ((Button)colors.Controls.Find("reset-colors", true).Single()).PerformClick();
+                Equal("#800080", colors.Settings.ColorFor("Presenting"), "reset updates draft palette");
+                Equal("#123ABC", uiSettings.ColorFor("Presenting"), "draft reset does not mutate live palette");
+                ((Button)colors.Controls.Find("cancel-colors", true).Single()).PerformClick();
+                Equal(DialogResult.Cancel, colors.DialogResult, "cancel discards draft rather than accepting");
+            }
+            menu.Items.OfType<ToolStripMenuItem>().Single(item => item.Name == "tray-Offline").PerformClick();
+            Equal(false, presenting.Checked, "previous tray status unchecked");
+            Equal("Offline", store.Load().Status, "off available from tray");
+            using (var pairing = new PairingForm(matter, CancellationToken.None))
+                Equal(2, FindControls(pairing).OfType<TextBox>().Count(field => field.UseSystemPasswordChar), "both credentials masked");
+            form.Show();
+            Application.DoEvents();
+            var connection = form.Controls.Find("connection-state", true).Single();
+            var reconnect = (Button)form.Controls.Find("reconnect-light", true).Single();
+            Equal("Connected", connection.Text, "compact connected indicator after acknowledged write");
+            Equal("Light: Connected", connection.AccessibleName, "connection state readable without relying on color");
+            foreach (var (code, expected) in new[] { ("DeviceUnavailable", "Retrying"), ("NotPaired", "Not paired"), ("NotInstalled", "Unavailable") })
+            {
+                matter.Failure = new MatterException(code, "Synthetic connection detail.");
+                reconnect.PerformClick();
+                Equal(expected, connection.Text, "compact connection error state");
+                Equal(true, connection.AccessibleDescription?.Contains("Synthetic connection detail.") == true,
+                    "actionable error detail remains accessible");
+            }
+            matter.Failure = null;
+            reconnect.PerformClick();
+            Equal("Connected", connection.Text, "connection indicator recovers");
+            _ = form.Handle;
+            form.Close();
+            Equal(false, form.IsDisposed, "window close keeps tray app alive");
+            menu.Items.OfType<ToolStripMenuItem>().Single(item => item.Text == "Exit").PerformClick();
+            Equal(true, form.IsDisposed, "tray Exit disposes app");
+        }
+        catch (Exception exception) { uiFailure = exception; }
+        finally
+        {
+            if (File.Exists(uiPath)) File.Delete(uiPath);
+            if (Directory.Exists(uiDirectory)) Directory.Delete(uiDirectory);
+        }
+    });
+    uiThread.SetApartmentState(ApartmentState.STA);
+    uiThread.Start();
+    uiThread.Join();
+    if (uiFailure is not null) ExceptionDispatchInfo.Capture(uiFailure).Throw();
+
+    if (args.Length == 2 && args[0] == "--node")
+    {
+        var fixture = Path.Combine(Path.GetTempPath(), $"PresencePlus-ipc-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(fixture, "dist"));
+        try
+        {
+            File.Copy(Path.GetFullPath(args[1]), Path.Combine(fixture, "node.exe"));
+            File.Copy(Path.Combine(AppContext.BaseDirectory, "matter-fixture.js"), Path.Combine(fixture, "dist", "main.js"));
+            using var matter = new MatterOutput(fixture, Path.Combine(fixture, "storage"));
+            Equal(true, (await matter.InspectAsync(CancellationToken.None)).Paired, "real process IPC inspect");
+            await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => matter.SetAsync(StatusOptions.Get("Available").Led, CancellationToken.None)));
+            checks++;
+            var version = matter.ConnectionVersion;
+            await matter.PairAsync("synthetic-code", "synthetic-network", "synthetic-password", CancellationToken.None);
+            Equal(true, matter.ConnectionVersion > version, "pairing restarts helper to enable Bluetooth");
+            await ThrowsAsync<MatterException>(() => matter.SetAsync(new("fixture", "#010101"), CancellationToken.None), "out-of-order response rejected");
+            Equal(false, matter.IsRunning, "protocol failure discards helper");
+            await matter.SetAsync(StatusOptions.Get("Available").Led, CancellationToken.None);
+            Equal(true, matter.IsRunning, "helper restarts after protocol failure");
+            using var cancel = new CancellationTokenSource(100);
+            await ThrowsAsync<OperationCanceledException>(() => matter.SetAsync(new("fixture", "#020202"), cancel.Token), "in-flight request cancellation");
+            Equal(false, matter.IsRunning, "canceled reply cannot corrupt next request");
+            await matter.SetAsync(StatusOptions.Get("Available").Led, CancellationToken.None);
+            await ThrowsAsync<MatterException>(() => matter.SetAsync(new("fixture", "#030303"), CancellationToken.None), "unexpected helper exit surfaced");
+            matter.Dispose();
+            Equal(false, matter.IsRunning, "disposed helper no longer running");
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"IPC check failed: {exception}");
+            throw;
+        }
+        finally
+        {
+            for (var attempt = 0; ; attempt++)
+            {
+                try { Directory.Delete(fixture, recursive: true); break; }
+                catch (Exception exception) when (attempt < 5 && exception is IOException or UnauthorizedAccessException)
+                {
+                    await Task.Delay(250);
+                }
+            }
+        }
     }
+
+    Console.WriteLine($"All {checks} PresencePlus checks passed.");
+
+    static IEnumerable<Control> FindControls(Control root)
+    {
+        foreach (Control child in root.Controls)
+        {
+            yield return child;
+            foreach (var descendant in FindControls(child)) yield return descendant;
+        }
+    }
+}
+catch (Exception exception)
+{
+    Console.Error.WriteLine(exception);
+    Environment.ExitCode = 1;
+}
+
+sealed class ManualClock : TimeProvider
+{
+    private DateTimeOffset now = DateTimeOffset.UtcNow;
+    public override DateTimeOffset GetUtcNow() => now;
+    public void Advance(TimeSpan amount) => now += amount;
+}
+
+sealed class FakeMatter : IMatterOutput
+{
+    public List<LedState> States { get; } = [];
+    public bool IsRunning { get; set; } = true;
+    public long ConnectionVersion { get; set; } = 1;
+    public Exception? Failure { get; set; }
+    public Task? Pending { get; set; }
+
+    public async Task SetAsync(LedState state, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        States.Add(state);
+        if (Failure is not null) ExceptionDispatchInfo.Capture(Failure).Throw();
+        if (Pending is not null) await Pending.WaitAsync(cancellationToken);
+    }
+
+    public Task<MatterDeviceInfo> InspectAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(new MatterDeviceInfo(true, "Synthetic light", 1));
+    public Task<MatterDeviceInfo> PairAsync(string pairingCode, string ssid, string password, CancellationToken cancellationToken) =>
+        InspectAsync(cancellationToken);
 }

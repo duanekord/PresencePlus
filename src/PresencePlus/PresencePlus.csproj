@@ -1,13 +1,16 @@
-<Project Sdk="Microsoft.NET.Sdk.Web">
-
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Microsoft.Identity.Client.Broker" Version="4.91.0" />
+  <ItemGroup Condition="'$(MatterBundleDirectory)' != ''">
+    <Content Include="$(MatterBundleDirectory)\**\*" Exclude="$(MatterBundleDirectory)\**\*.ts;$(MatterBundleDirectory)\**\*.map">
+      <Link>Matter\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
-
 </Project>
