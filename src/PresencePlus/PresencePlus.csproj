@@ -6,6 +6,10 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <EmbeddedResource Include="TabletDisplay\*" />
+  </ItemGroup>
   <ItemGroup Condition="'$(MatterBundleDirectory)' != ''">
     <Content Include="$(MatterBundleDirectory)\**\*" Exclude="$(MatterBundleDirectory)\**\*.ts;$(MatterBundleDirectory)\**\*.map">
       <Link>Matter\%(RecursiveDir)%(Filename)%(Extension)</Link>

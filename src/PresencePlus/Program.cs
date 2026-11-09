@@ -14,6 +14,8 @@ internal static class Program
         {
             using var form = new StatusColorsForm(new AppSettings());
             _ = form.Handle;
+            using var display = new TabletDisplay(new AppSettings(), System.Net.IPAddress.Loopback, 0);
+            Task.Run(display.StartAsync).GetAwaiter().GetResult();
             Console.WriteLine("PresencePlus Windows runtime loaded.");
             return;
         }
