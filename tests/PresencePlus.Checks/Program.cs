@@ -5,6 +5,15 @@ using PresencePlus;
 
 try
 {
+    if (args is ["--tablet-preview"])
+    {
+        using var preview = new TabletDisplay(new AppSettings { Status = "Presenting" }, System.Net.IPAddress.Loopback, 0);
+        await preview.StartAsync();
+        Console.WriteLine(preview.GetLinks().Single());
+        await Task.Delay(TimeSpan.FromMinutes(5));
+        return;
+    }
+
     if (args.Length == 2 && args[0] == "--screenshots")
     {
         DocumentationScreenshots.Capture(Path.GetFullPath(args[1]));
@@ -41,7 +50,7 @@ try
         return;
     }
 
-    var checks = 0;
+    var checks = await TabletDisplayChecks.RunAsync();
     void Equal<T>(T expected, T actual, string name)
     {
         if (!EqualityComparer<T>.Default.Equals(expected, actual))
@@ -282,7 +291,12 @@ try
             var matter = new FakeMatter();
             var led = new LedController(matter);
             var uiSettings = new AppSettings().WithStatusColor("Presenting", "#123ABC");
-            using var form = new MainForm(store, uiSettings, led, matter, false);
+            using var tablet = new TabletDisplay(uiSettings, System.Net.IPAddress.Loopback, 0);
+            using var form = new MainForm(store, uiSettings, led, matter, false, tablet);
+            var sharing = (CheckBox)form.Controls.Find("share-tablet", true).Single();
+            var tabletLink = (Button)form.Controls.Find("tablet-link", true).Single();
+            Equal(false, sharing.Checked, "tablet sharing starts disabled");
+            Equal(false, tabletLink.Enabled, "tablet link unavailable until opted in");
             Equal(7, StatusOptions.All.SelectMany(option => form.Controls.Find($"status-{option.Id}", true)).Count(),
                 "window exposes all status buttons");
             Equal(1, form.Controls.Find("pair-light", true).Length, "Matter pairing control available");
@@ -328,8 +342,29 @@ try
                 Equal(2, FindControls(pairing).OfType<TextBox>().Count(field => field.UseSystemPasswordChar), "both credentials masked");
             form.Show();
             Application.DoEvents();
+            sharing.Checked = true;
+            var sharingDeadline = DateTime.UtcNow.AddSeconds(10);
+            while (!sharing.Enabled && DateTime.UtcNow < sharingDeadline)
+            {
+                Application.DoEvents();
+                Thread.Sleep(10);
+            }
+            Equal(true, sharing.Enabled && tabletLink.Enabled && tablet.IsRunning, "UI enables read-only tablet host");
+            using (var tabletClient = new HttpClient())
+            {
+                var link = new Uri(tablet.GetLinks().Single());
+                tabletClient.DefaultRequestHeaders.Add("X-PresencePlus-Display-Key", link.Fragment[1..]);
+                menu.Items.OfType<ToolStripMenuItem>().Single(item => item.Name == "tray-Busy").PerformClick();
+                var json = tabletClient.GetStringAsync(new Uri(link, "/api/status")).GetAwaiter().GetResult();
+                using var trayStatus = JsonDocument.Parse(json);
+                Equal("Busy", trayStatus.RootElement.GetProperty("status").GetString(), "tray changes reach tablet");
+                ((Button)form.Controls.Find("status-Presenting", true).Single()).PerformClick();
+                using var selected = JsonDocument.Parse(tabletClient.GetStringAsync(new Uri(link, "/api/status")).GetAwaiter().GetResult());
+                Equal("#123ABC", selected.RootElement.GetProperty("color").GetString(), "window selection sends custom color to tablet");
+            }
             var connection = form.Controls.Find("connection-state", true).Single();
             var reconnect = (Button)form.Controls.Find("reconnect-light", true).Single();
+            reconnect.PerformClick();
             Equal("Connected", connection.Text, "compact connected indicator after acknowledged write");
             Equal("Light: Connected", connection.AccessibleName, "connection state readable without relying on color");
             foreach (var (code, expected) in new[] { ("DeviceUnavailable", "Retrying"), ("NotPaired", "Not paired"), ("NotInstalled", "Unavailable") })
@@ -346,8 +381,10 @@ try
             _ = form.Handle;
             form.Close();
             Equal(false, form.IsDisposed, "window close keeps tray app alive");
+            Equal(true, tablet.IsRunning, "tray operation keeps tablet display alive");
             menu.Items.OfType<ToolStripMenuItem>().Single(item => item.Text == "Exit").PerformClick();
             Equal(true, form.IsDisposed, "tray Exit disposes app");
+            Equal(false, tablet.IsRunning, "tray Exit stops tablet listener");
         }
         catch (Exception exception) { uiFailure = exception; }
         finally

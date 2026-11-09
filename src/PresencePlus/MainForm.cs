@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Security;
+using System.Net.NetworkInformation;
 
 namespace PresencePlus;
 
@@ -21,6 +22,10 @@ public sealed class MainForm : Form
     private readonly NumericUpDown brightness = new() { Minimum = 1, Maximum = 100, Value = 100, AccessibleName = "Light brightness percent" };
     private readonly CheckBox minimizeOnStart = new() { AutoSize = true, Text = "Start minimized to the tray" };
     private readonly CheckBox startAtLogin = new() { AutoSize = true, Text = "Start PresencePlus when I sign into Windows" };
+    private readonly CheckBox shareTablet = new() { AutoSize = true, Text = "Share read-only tablet display (this session)", Name = "share-tablet" };
+    private readonly Button tabletLink = new() { AutoSize = true, Text = "Tablet link...", Enabled = false, Name = "tablet-link" };
+    private readonly TabletDisplay tabletDisplay;
+    private bool changingTabletSharing;
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
     private readonly CancellationTokenSource shutdown = new();
     private AppSettings settings;
@@ -33,23 +38,25 @@ public sealed class MainForm : Form
     private DateTimeOffset retryAfter;
     private readonly bool startMinimized;
 
-    public MainForm(AppSettingsStore store, AppSettings settings, LedController controller, IMatterOutput matter, bool startMinimized)
+    public MainForm(AppSettingsStore store, AppSettings settings, LedController controller, IMatterOutput matter, bool startMinimized,
+        TabletDisplay? tabletDisplay = null)
     {
         this.store = store;
         this.settings = settings;
         this.controller = controller;
         this.matter = matter;
+        this.tabletDisplay = tabletDisplay ?? new TabletDisplay(settings);
         this.startMinimized = startMinimized || settings.StartMinimized;
         controller.Configure(settings);
         Text = "PresencePlus";
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(520, 600);
-        MinimumSize = new Size(460, 620);
+        ClientSize = new Size(520, 660);
+        MinimumSize = new Size(460, 680);
 
         var layout = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill, Padding = new Padding(20), ColumnCount = 1, RowCount = 8,
+            Dock = DockStyle.Fill, Padding = new Padding(20), ColumnCount = 1, RowCount = 9,
             AutoScroll = true
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -148,6 +155,22 @@ public sealed class MainForm : Form
         startAtLogin.CheckedChanged += (_, _) => ChangeLoginStartup();
         preferences.Controls.AddRange([minimizeOnStart, startAtLogin]);
         layout.Controls.Add(preferences);
+        var tabletOptions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        shareTablet.CheckedChanged += async (_, _) => await ChangeTabletSharingAsync();
+        tabletLink.Click += (_, _) =>
+        {
+            try
+            {
+                using var dialog = new TabletLinkForm(this.tabletDisplay.GetLinks());
+                dialog.ShowDialog(this);
+            }
+            catch (Exception exception) when (exception is NetworkInformationException or InvalidOperationException)
+            {
+                ShowError(exception.Message);
+            }
+        };
+        tabletOptions.Controls.AddRange([shareTablet, tabletLink]);
+        layout.Controls.Add(tabletOptions);
         layout.Controls.Add(new Label
         {
             Text = "Close the window to keep running in the tray.",
@@ -199,6 +222,7 @@ public sealed class MainForm : Form
             store.Save(next);
             controller.Configure(next);
             settings = next;
+            tabletDisplay.Update(settings);
             retryAfter = DateTimeOffset.MinValue;
             if (selectionChanged) SetConnection(LightConnectionState.Updating, "Applying your selection.");
         }
@@ -296,6 +320,35 @@ public sealed class MainForm : Form
         }
     }
 
+    private async Task ChangeTabletSharingAsync()
+    {
+        if (changingTabletSharing || exiting) return;
+        changingTabletSharing = true;
+        shareTablet.Enabled = false;
+        tabletLink.Enabled = false;
+        try
+        {
+            if (shareTablet.Checked) await tabletDisplay.StartAsync();
+            else await tabletDisplay.StopAsync();
+        }
+        catch (Exception exception) when (exception is IOException or System.Net.Sockets.SocketException or
+            UnauthorizedAccessException or InvalidOperationException)
+        {
+            if (!IsDisposed) ShowError($"Tablet sharing could not be changed: {exception.Message}\n\nCheck whether TCP port {TabletDisplay.DefaultPort} is already in use.");
+        }
+        finally
+        {
+            if (!IsDisposed)
+            {
+                shareTablet.Checked = tabletDisplay.IsRunning;
+                shareTablet.Enabled = true;
+                tabletLink.Enabled = tabletDisplay.IsRunning;
+            }
+            changingTabletSharing = false;
+        }
+        if (exiting || IsDisposed) tabletDisplay.Dispose();
+    }
+
     private void ShowError(string message)
     {
         RestoreWindow();
@@ -322,6 +375,7 @@ public sealed class MainForm : Form
         exiting = true;
         timer.Stop();
         shutdown.Cancel();
+        tabletDisplay.Dispose();
         tray.Visible = false;
         Close();
     }
@@ -330,7 +384,9 @@ public sealed class MainForm : Form
     {
         if (disposing && !IsDisposed)
         {
+            exiting = true;
             shutdown.Cancel();
+            tabletDisplay.Dispose();
             timer.Dispose();
             tray.Dispose();
             trayMenu.Dispose();

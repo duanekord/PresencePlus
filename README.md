@@ -14,6 +14,7 @@ The app currently provides:
 - A compact connection indicator, reconnect control, and automatic retries.
 - Saved status, colors, brightness, and pairing across app restarts.
 - Background operation in the Windows tray and optional startup at Windows login.
+- An opt-in, read-only browser display for a tablet on the same trusted local network.
 
 Bluetooth is used for first-time pairing. After pairing, control uses the local
 Wi-Fi/IPv6 network.
@@ -109,7 +110,8 @@ between PCs or run multiple controllers against copies of that identity.
 | Local controller | TypeScript, Matter.js 0.18.0, bundled Node.js 24.22.2 |
 | Initial setup | Native Windows Bluetooth LE through `@matter/nodejs-ble`; production Matter device attestation |
 | Normal control | Matter over the local Wi-Fi/IPv6 network, with multicast discovery |
-| App/helper communication | Private JSON-lines standard-input/output pipes; no app HTTP listener |
+| App/helper communication | Private JSON-lines standard-input/output pipes, independent of tablet sharing |
+| Optional tablet display | Embedded ASP.NET Core HTTP server; read-only status page on the trusted LAN |
 | Preferences and pairing | Per-user JSON preferences and a separately permission-restricted Matter fabric store |
 | Distribution | Self-contained Windows x64 ZIP, SHA256 checksum, GitHub Actions and GitHub Releases |
 
@@ -176,6 +178,49 @@ Exiting, PC sleep, logout, and network loss do **not** automatically turn off th
 hardware. Choose **Off** and wait for **Connected** before exiting if
 needed. Use a device-side watchdog if automatic fail-safe behavior is required.
 
+## Read-only Android/tablet display
+
+The tablet needs only a browser, not an Android app or a Matter connection.
+It shows the **selected status name and custom color**, independently of whether
+the physical light is paired or connected. There are no status-changing controls
+or write endpoints.
+
+1. Connect the PC and tablet to the same **trusted private Wi-Fi/LAN**.
+2. In PresencePlus, select **Share read-only tablet display (this session)**,
+   then **Tablet link...**.
+3. Copy a complete link for the PC's reachable network address and transfer it
+   privately to the tablet. Open it in Chrome or another current browser. Include
+   the entire `#...` portion: it is the read-only access key.
+4. Leave that page open. It shows **Duane's Status** above the status name,
+   with no subtitle below it. The background fills with the status color and the
+   name uses contrasting text. Updates are polled every second. If a request fails or
+   times out (four seconds), the page clears the old status and shows
+   **Disconnected**. Returning from a background tab rechecks before showing status.
+5. Configure the tablet's screen timeout/kiosk settings if it should stay on.
+   The page does not override Android's sleep settings.
+
+If Windows Firewall prompts, allow PresencePlus **only on your trusted Private
+network**. If organizational policy requires a rule, ask your administrator to
+allow inbound TCP **47831** from the local subnet on the Private profile only.
+PresencePlus does not change firewall rules or request administrator privileges.
+Guest Wi-Fi/client isolation, VPNs, or a firewall can prevent access. A link for
+another PC adapter may not be reachable; choose the address on the tablet's LAN.
+IPv4 private/link-local addresses are supported; IPv6-only networks are not.
+
+Sharing is **off by default and is not saved across app restarts**. Closing the
+window to the tray keeps sharing alive. Uncheck sharing or exit the app to stop
+the listener. Every new sharing session creates a new key: reopen **Tablet link...**
+and update the tablet's bookmark after restarting or toggling sharing.
+An expired link displays **Link expired** when it reaches the PC.
+
+This is a local HTTP display, **not an internet service**. Keep the link private:
+anyone who has it and can reach the PC can view your status, but cannot change it.
+HTTP is unencrypted, so use only a trusted LAN. Do not port-forward this port,
+expose it publicly, or use it for sensitive status information on untrusted Wi-Fi.
+No pairing codes, Wi-Fi credentials, or Matter controller data are served.
+The PC must remain awake with PresencePlus running. If the tablet is at a different
+location over the internet, this implementation does not provide that connectivity.
+
 ## Settings and security
 
 Preferences are saved atomically to
@@ -194,7 +239,11 @@ Pairing verifies the device's attestation against CSA's production certificate
 service. Certificate errors, warnings, test certificates, and unavailable trust
 services block pairing. Raw protocol payloads are not logged.
 
-The helper uses no listener or HTTP port for app communication. Do not expose
+The helper uses no listener or HTTP port for app communication. The separate,
+optional tablet server listens on IPv4 TCP port 47831 only while sharing is enabled.
+It requires a random viewing key, rejects nonlocal client addresses and DNS
+hostnames, and serves only its embedded viewer and read-only status endpoint.
+Do not expose
 Matter services to the public internet. Your network must allow local IPv6 and
 multicast discovery between the PC and light. The app scopes discovery to an
 active Wi-Fi or Ethernet adapter with a gateway, preferring Wi-Fi, to avoid
@@ -255,7 +304,8 @@ shipped. Node.js stays in the external `Matter` folder. This avoids extracting
 thousands of individual dependency files while retaining both runtimes.
 
 Developers can opt into `-FrameworkDependent` for a smaller app that requires the
-.NET 10 Desktop Runtime. `-Unbundled` on `Publish.ps1` or `Package.ps1` produces
+.NET 10 Desktop Runtime **and ASP.NET Core Runtime**. Both are included in the
+default self-contained download. `-Unbundled` on `Publish.ps1` or `Package.ps1` produces
 the larger, original-style dependency layout for troubleshooting and comparison.
 Use a fresh output folder when switching between layouts; publishing over an
 old folder does not remove obsolete dependency files.
@@ -324,6 +374,8 @@ retain their own licenses, included in the download's `licenses` directory,
 
 ```powershell
 dotnet run --project .\tests\PresencePlus.Checks
+# Browser display polling, stale-state handling, and readable colors (Node.js):
+node --test .\tests\PresencePlus.Checks\tablet-display.test.mjs
 # Include real process/pipe lifecycle checks using a trusted Node executable:
 dotnet run --project .\tests\PresencePlus.Checks -- --node 'C:\path\to\node.exe'
 

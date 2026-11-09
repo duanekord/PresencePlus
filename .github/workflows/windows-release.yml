@@ -37,6 +37,9 @@ jobs:
       - name: Check Windows UI, settings, and process protocol
         shell: pwsh
         run: dotnet run --project .\tests\PresencePlus.Checks -c Release -- --node (Get-Command node).Source
+      - name: Check read-only tablet viewer
+        shell: pwsh
+        run: node --test .\tests\PresencePlus.Checks\tablet-display.test.mjs
       - name: Create portable package
         shell: pwsh
         run: |
