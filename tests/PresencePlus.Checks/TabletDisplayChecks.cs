@@ -21,7 +21,8 @@ internal static class TabletDisplayChecks
             Equal(false, TabletDisplay.IsLocalAddress(IPAddress.Parse(ip)), "nonlocal client rejected");
         Equal(false, TabletDisplay.IsLocalAddress(null), "missing client rejected");
 
-        using var display = new TabletDisplay(new AppSettings(), IPAddress.Loopback, 0);
+        var savedSettings = new AppSettings().WithTabletSharing(true);
+        using var display = new TabletDisplay(savedSettings, IPAddress.Loopback, 0);
         Equal(false, display.IsRunning, "sharing is opt-in");
         await display.StartAsync();
         Equal(true, display.IsRunning, "host started");
@@ -85,12 +86,28 @@ internal static class TabletDisplayChecks
         catch (HttpRequestException) { checks++; }
         await display.StartAsync();
         var replacement = new Uri(display.GetLinks().Single());
-        Equal(false, key == replacement.Fragment[1..], "re-enable rotates viewing key");
+        Equal(key, replacement.Fragment[1..], "re-enable preserves viewing key");
         using (var staleClient = new HttpClient())
         {
             staleClient.DefaultRequestHeaders.Add("X-PresencePlus-Display-Key", key);
             using var response = await staleClient.GetAsync(new Uri(replacement, "/api/status"));
-            Equal(HttpStatusCode.Unauthorized, response.StatusCode, "old link cannot read new sharing session");
+            Equal(HttpStatusCode.OK, response.StatusCode, "bookmarked key still works after re-enable");
+        }
+        var resetSettings = savedSettings.WithNewTabletDisplayKey();
+        display.Update(resetSettings);
+        var resetLink = new Uri(display.GetLinks().Single());
+        Equal(false, key == resetLink.Fragment[1..], "explicit reset rotates viewing key");
+        using (var oldClient = new HttpClient())
+        {
+            oldClient.DefaultRequestHeaders.Add("X-PresencePlus-Display-Key", key);
+            using var response = await oldClient.GetAsync(new Uri(resetLink, "/api/status"));
+            Equal(HttpStatusCode.Unauthorized, response.StatusCode, "reset immediately revokes old link");
+        }
+        using (var newClient = new HttpClient())
+        {
+            newClient.DefaultRequestHeaders.Add("X-PresencePlus-Display-Key", resetLink.Fragment[1..]);
+            using var response = await newClient.GetAsync(new Uri(resetLink, "/api/status"));
+            Equal(HttpStatusCode.OK, response.StatusCode, "replacement link works without restarting host");
         }
         display.Dispose();
         Equal(false, display.IsRunning, "dispose stops listener");
@@ -100,6 +117,16 @@ internal static class TabletDisplayChecks
             throw new InvalidOperationException("Disposed display restarted.");
         }
         catch (ObjectDisposedException) { checks++; }
+
+        using (var restarted = new TabletDisplay(resetSettings, IPAddress.Loopback, resetLink.Port))
+        {
+            await restarted.StartAsync();
+            Equal(resetLink.ToString(), restarted.GetLinks().Single(), "entire URL survives recreation on the same address and port");
+            using var restartedClient = new HttpClient();
+            restartedClient.DefaultRequestHeaders.Add("X-PresencePlus-Display-Key", resetLink.Fragment[1..]);
+            using var response = await restartedClient.GetAsync(new Uri(resetLink, "/api/status"));
+            Equal(HttpStatusCode.OK, response.StatusCode, "saved bookmark authenticates after app recreation");
+        }
 
         using (var racing = new TabletDisplay(new AppSettings(), IPAddress.Loopback, 0))
         {

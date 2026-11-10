@@ -22,8 +22,9 @@ public sealed class MainForm : Form
     private readonly NumericUpDown brightness = new() { Minimum = 1, Maximum = 100, Value = 100, AccessibleName = "Light brightness percent" };
     private readonly CheckBox minimizeOnStart = new() { AutoSize = true, Text = "Start minimized to the tray" };
     private readonly CheckBox startAtLogin = new() { AutoSize = true, Text = "Start PresencePlus when I sign into Windows" };
-    private readonly CheckBox shareTablet = new() { AutoSize = true, Text = "Share read-only tablet display (this session)", Name = "share-tablet" };
+    private readonly CheckBox shareTablet = new() { AutoSize = true, Text = "Share read-only tablet display", Name = "share-tablet" };
     private readonly Button tabletLink = new() { AutoSize = true, Text = "Tablet link...", Enabled = false, Name = "tablet-link" };
+    private readonly Button resetTabletLink = new() { AutoSize = true, Text = "Reset viewing link...", Enabled = false, Name = "reset-tablet-link" };
     private readonly TabletDisplay tabletDisplay;
     private bool changingTabletSharing;
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
@@ -156,6 +157,8 @@ public sealed class MainForm : Form
         preferences.Controls.AddRange([minimizeOnStart, startAtLogin]);
         layout.Controls.Add(preferences);
         var tabletOptions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        shareTablet.Checked = settings.TabletDisplayEnabled;
+        resetTabletLink.Enabled = settings.TabletDisplayKey is not null;
         shareTablet.CheckedChanged += async (_, _) => await ChangeTabletSharingAsync();
         tabletLink.Click += (_, _) =>
         {
@@ -169,7 +172,14 @@ public sealed class MainForm : Form
                 ShowError(exception.Message);
             }
         };
-        tabletOptions.Controls.AddRange([shareTablet, tabletLink]);
+        resetTabletLink.Click += (_, _) =>
+        {
+            if (MessageBox.Show(this, "Reset the private viewing link? All existing tablet bookmarks will stop working. " +
+                "Open Tablet link... afterwards and update each tablet.", "PresencePlus",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes)
+                ResetTabletDisplayLink();
+        };
+        tabletOptions.Controls.AddRange([shareTablet, tabletLink, resetTabletLink]);
         layout.Controls.Add(tabletOptions);
         layout.Controls.Add(new Label
         {
@@ -200,6 +210,7 @@ public sealed class MainForm : Form
         {
             if (this.startMinimized) HideToTray();
             timer.Start();
+            if (this.settings.TabletDisplayEnabled) await ChangeTabletSharingAsync();
             await SynchronizeAsync();
         };
         Resize += (_, _) => { if (WindowState == FormWindowState.Minimized) HideToTray(); };
@@ -324,17 +335,40 @@ public sealed class MainForm : Form
     {
         if (changingTabletSharing || exiting) return;
         changingTabletSharing = true;
+        var wasRunning = tabletDisplay.IsRunning;
+        var enabled = shareTablet.Checked;
         shareTablet.Enabled = false;
         tabletLink.Enabled = false;
+        resetTabletLink.Enabled = false;
         try
         {
-            if (shareTablet.Checked) await tabletDisplay.StartAsync();
+            var candidate = settings.WithTabletSharing(enabled);
+            tabletDisplay.Update(candidate);
+            if (enabled) await tabletDisplay.StartAsync();
             else await tabletDisplay.StopAsync();
+            // Status can change while the listener starts; preserve the latest selection.
+            var next = settings with { TabletDisplayEnabled = enabled, TabletDisplayKey = candidate.TabletDisplayKey };
+            store.Save(next);
+            settings = next;
+            tabletDisplay.Update(settings);
         }
         catch (Exception exception) when (exception is IOException or System.Net.Sockets.SocketException or
-            UnauthorizedAccessException or InvalidOperationException)
+            UnauthorizedAccessException or InvalidOperationException or ArgumentException or SecurityException)
         {
-            if (!IsDisposed) ShowError($"Tablet sharing could not be changed: {exception.Message}\n\nCheck whether TCP port {TabletDisplay.DefaultPort} is already in use.");
+            var message = $"Tablet sharing could not be changed: {exception.Message}\n\n" +
+                $"Check settings folder access and whether TCP port {TabletDisplay.DefaultPort} is already in use.";
+            try
+            {
+                tabletDisplay.Update(settings);
+                if (wasRunning) await tabletDisplay.StartAsync();
+                else await tabletDisplay.StopAsync();
+            }
+            catch (Exception rollback) when (rollback is IOException or System.Net.Sockets.SocketException or
+                UnauthorizedAccessException or InvalidOperationException)
+            {
+                message += $"\n\nThe previous listener state could not be restored: {rollback.Message}";
+            }
+            if (!IsDisposed && !exiting) ShowError(message);
         }
         finally
         {
@@ -343,11 +377,14 @@ public sealed class MainForm : Form
                 shareTablet.Checked = tabletDisplay.IsRunning;
                 shareTablet.Enabled = true;
                 tabletLink.Enabled = tabletDisplay.IsRunning;
+                resetTabletLink.Enabled = tabletDisplay.IsRunning || settings.TabletDisplayKey is not null;
             }
             changingTabletSharing = false;
         }
         if (exiting || IsDisposed) tabletDisplay.Dispose();
     }
+
+    internal void ResetTabletDisplayLink() => SaveSelection(settings.WithNewTabletDisplayKey());
 
     private void ShowError(string message)
     {

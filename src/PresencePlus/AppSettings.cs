@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Win32;
 
@@ -12,6 +13,8 @@ public sealed record AppSettings
     public string Status { get; init; } = "Available";
     public int BrightnessPercent { get; init; } = 100;
     public bool StartMinimized { get; init; }
+    public bool TabletDisplayEnabled { get; init; }
+    public string? TabletDisplayKey { get; init; }
     public ImmutableDictionary<string, string> StatusColors { get; init; } = ImmutableDictionary<string, string>.Empty;
 
     public string ColorFor(string status)
@@ -21,6 +24,26 @@ public sealed record AppSettings
     }
 
     public LedState GetLedState() => new(Status, ColorFor(Status), BrightnessPercent);
+
+    public AppSettings WithTabletSharing(bool enabled)
+    {
+        var next = this with
+        {
+            TabletDisplayEnabled = enabled,
+            TabletDisplayKey = enabled && TabletDisplayKey is null ? CreateTabletDisplayKey() : TabletDisplayKey
+        };
+        next.Validate();
+        return next;
+    }
+
+    public AppSettings WithNewTabletDisplayKey()
+    {
+        var next = this with { TabletDisplayKey = CreateTabletDisplayKey() };
+        next.Validate();
+        return next;
+    }
+
+    internal static string CreateTabletDisplayKey() => Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
 
     public AppSettings WithStatusColor(string status, string color)
     {
@@ -38,6 +61,11 @@ public sealed record AppSettings
         StatusOptions.Get(Status);
         if (BrightnessPercent is < 1 or > 100)
             throw new ArgumentException("Brightness must be between 1 and 100 percent.");
+        if (TabletDisplayEnabled && TabletDisplayKey is null)
+            throw new ArgumentException("Enabled tablet sharing requires a saved viewing key.");
+        if (TabletDisplayKey is not null &&
+            (TabletDisplayKey.Length != 64 || TabletDisplayKey.AsSpan().IndexOfAnyExcept("0123456789ABCDEF") >= 0))
+            throw new ArgumentException("The tablet viewing key must contain 64 uppercase hexadecimal characters.");
         if (StatusColors is null) throw new ArgumentException("Status colors must be a color map.");
         foreach (var (status, color) in StatusColors)
         {
