@@ -40,7 +40,7 @@
       });
       if (current !== generation) return;
       if (response.status === 401) {
-        unavailable("Link expired");
+        unavailable("Link reset");
         return;
       }
       if (!response.ok) throw new Error(`Display request failed (${response.status}).`);
@@ -56,7 +56,7 @@
       document.title = `Duane's Status - ${value.name}`;
     } catch (error) {
       if (current !== generation) return;
-      unavailable("Disconnected");
+      unavailable("PC unavailable");
     } finally {
       clearTimeout(timeout);
       if (current === generation) timer = setTimeout(refresh, 1000);
@@ -66,7 +66,7 @@
   window.addEventListener("offline", () => {
     ++generation;
     clearTimeout(timer);
-    unavailable("Disconnected");
+    unavailable("PC unavailable");
   });
   window.addEventListener("online", refresh);
   document.addEventListener("visibilitychange", () => {

@@ -33,7 +33,7 @@ public sealed class TabletLinkForm : Form
         {
             Text = links.Count == 0
                 ? "No private IPv4 address found. Connect the PC to a private Wi-Fi or Ethernet network, then reopen this dialog."
-                : "Keep this link private. HTTP is not encrypted. Allow TCP port 47831 only on a trusted private network; never port-forward it. Sharing stops when you exit the app.",
+                : "Bookmark the complete link. It survives app restarts; reserve the PC's IP address in your router. Keep it private: HTTP is unencrypted. Allow TCP 47831 only on a trusted private network; never port-forward it.",
             AutoSize = true, MaximumSize = new Size(590, 0)
         });
         var actions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };

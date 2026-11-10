@@ -14,7 +14,7 @@ The app currently provides:
 - A compact connection indicator, reconnect control, and automatic retries.
 - Saved status, colors, brightness, and pairing across app restarts.
 - Background operation in the Windows tray and optional startup at Windows login.
-- An opt-in, read-only browser display for a tablet on the same trusted local network.
+- An opt-in, read-only browser display with a saved viewing link for a tablet on the same trusted local network.
 
 Bluetooth is used for first-time pairing. After pairing, control uses the local
 Wi-Fi/IPv6 network.
@@ -186,8 +186,8 @@ the physical light is paired or connected. There are no status-changing controls
 or write endpoints.
 
 1. Connect the PC and tablet to the same **trusted private Wi-Fi/LAN**.
-2. In PresencePlus, select **Share read-only tablet display (this session)**,
-   then **Tablet link...**.
+2. In PresencePlus, select **Share read-only tablet display**, then **Tablet link...**.
+   This choice is saved and sharing resumes automatically when the app next starts.
 3. Copy a complete link for the PC's reachable network address and transfer it
    privately to the tablet. Open it in Chrome or another current browser. Include
    the entire `#...` portion: it is the read-only access key.
@@ -195,7 +195,7 @@ or write endpoints.
    with no subtitle below it. The background fills with the status color and the
    name uses contrasting text. Updates are polled every second. If a request fails or
    times out (four seconds), the page clears the old status and shows
-   **Disconnected**. Returning from a background tab rechecks before showing status.
+   **PC unavailable**. Returning from a background tab rechecks before showing status.
 5. Configure the tablet's screen timeout/kiosk settings if it should stay on.
    The page does not override Android's sleep settings.
 
@@ -207,11 +207,53 @@ Guest Wi-Fi/client isolation, VPNs, or a firewall can prevent access. A link for
 another PC adapter may not be reachable; choose the address on the tablet's LAN.
 IPv4 private/link-local addresses are supported; IPv6-only networks are not.
 
-Sharing is **off by default and is not saved across app restarts**. Closing the
-window to the tray keeps sharing alive. Uncheck sharing or exit the app to stop
-the listener. Every new sharing session creates a new key: reopen **Tablet link...**
-and update the tablet's bookmark after restarting or toggling sharing.
-An expired link displays **Link expired** when it reaches the PC.
+Sharing is **off by default** for new and existing installations until you enable it.
+After opting in, the app saves both the sharing preference and the private viewing
+key. Bookmark the complete link once: restarting the app or disabling and re-enabling
+sharing no longer changes the key. Links from the older, session-only version must
+be replaced once after upgrading.
+
+Closing the window to the tray keeps sharing alive. Uncheck sharing to stop the
+listener and save your opt-out, or exit the app to stop it until the next launch.
+Choose **Reset viewing link...** and confirm to revoke all existing bookmarks,
+then open **Tablet link...** and update your tablets. Resetting also works while
+sharing is disabled and does not enable it. An old link displays **Link reset**
+when it reaches the PC. A failed startup or settings write produces a visible error;
+check folder permissions, port conflicts, and firewall access before retrying.
+
+### One-time kitchen / Cozyla setup
+
+1. In your router, create a **DHCP reservation** for the PC's active Wi-Fi or
+   Ethernet adapter. This keeps its local IPv4 address stable; each adapter has its
+   own address. Apply the reservation and use the matching address from **Tablet
+   link...**. The app already uses fixed TCP port **47831**. Changing networks or
+   adapters can still require a different address; a saved key alone cannot prevent
+   that. DNS hostnames and `.local` names are not supported by this server.
+2. Enable **Start PresencePlus when I sign into Windows** as well as tablet sharing.
+   The server resumes after Windows sign-in, not before login, and the PC must stay
+   awake. These are separate preferences; sharing does not silently change Windows
+   startup settings.
+3. On an Android-based **Cozyla Calendar Plus**, open the complete viewing link in a
+   browser and bookmark it. For a dedicated display, configure an appropriate
+   browser/kiosk app to open that link, stay visible, and retry failed navigation.
+   App autostart, screen timeout, and battery/background restrictions depend on the
+   Cozyla model and chosen app and must be configured on the tablet.
+4. To retain the family calendar alongside status, use supported split-screen mode
+   or a third-party webpage-widget app compatible with your device. A normal browser
+   shortcut is not a live home-screen widget. Cozyla supports app-provided widgets,
+   but arbitrary URL embedding and widget refresh behavior need verification on
+   your exact model. No native PresencePlus Android widget is included.
+
+Once loaded, the display automatically retries while the PC restarts, sleeps, or
+temporarily loses its network connection, replacing stale status with **PC unavailable**.
+It recovers with the same bookmark when the PC is awake, signed in, and PresencePlus
+is running again. If the tablet itself boots or reloads the page while the PC is
+offline, the browser may instead show its own connection-error page; retry-on-error
+in the chosen browser/widget is needed to recover from that initial navigation.
+PresencePlus cannot control browser error pages or Android autostart settings.
+
+Cozyla references: [Calendar Plus capabilities](https://www.cozyla.com/pages/all-in-one-smart-family-hub)
+and [app-provided home-screen widgets](https://support.cozyla.com/hc/en-us/articles/26643934200731-Customize-Widgets-on-the-Home-Screen).
 
 This is a local HTTP display, **not an internet service**. Keep the link private:
 anyone who has it and can reach the PC can view your status, but cannot change it.
@@ -227,6 +269,9 @@ Preferences are saved atomically to
 `%LOCALAPPDATA%\PresencePlus\settings.json`. Your palette, last status, and brightness are
 restored and sent on startup. Invalid settings produce a visible error rather
 than silently resetting your choices.
+The same file stores your tablet sharing preference and private viewing key.
+Treat it and any backups as private; do not attach it to issues or logs. Anyone
+with the key and network access to the PC can view status until you reset the link.
 
 Matter controller credentials are stored separately under
 `%LOCALAPPDATA%\PresencePlus\Matter`, with current-user-only Windows permissions.
@@ -351,18 +396,27 @@ To reproduce the automated comparison (results are written under `artifacts`):
 ```
 
 GitHub Actions runs checks and creates downloadable workflow artifacts on pull
-requests and pushes to `main`. Publishing a version tag from reviewed `main`
-also creates the public GitHub release and uploads the ZIP and checksum:
+requests and pushes to `main`. The root `VERSION` file selects the package version.
+To publish a new release, update that file to a new semantic version in a pull
+request and merge it into `main`. After all checks, packaging, and extracted-download
+verification succeed, the workflow creates the matching `v` tag at that exact
+merged commit and publishes the ZIP and SHA256 checksum to GitHub Releases.
+Pull request builds do not publish releases.
+
+Later pushes with the same version leave the existing release, tag, and assets
+unchanged. Publishing is serialized per version. If a tag already exists without
+a release, the main-branch publish fails explicitly rather than releasing a
+different commit. The existing version-tag publishing path is still available:
 
 ```powershell
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0-rc.2
+git push origin v0.2.0-rc.2
 ```
 
 Use a new semantic version for each release. Do not retag an existing download.
 Release publishing uses only the workflow's repository-scoped GitHub token.
-Tags with a suffix, such as `v0.1.0-rc.1`, publish a clearly marked pre-release;
-normal releases should be tagged from reviewed `main`. Branch protections still
+Versions with a suffix, such as `0.2.0-rc.2`, publish a clearly marked pre-release;
+normal releases should come from reviewed `main`. Branch protections still
 apply: a successful build does not replace a required approving review.
 
 The project has not yet selected an open-source license. Third-party components

@@ -24,7 +24,7 @@ public sealed class TabletDisplay : IDisposable
     private bool disposed;
     private WebApplication? application;
     private TabletStatus status;
-    private byte[] key = [];
+    private byte[] key;
     private int listeningPort;
 
     public TabletDisplay(AppSettings settings) : this(settings, IPAddress.Any, DefaultPort) { }
@@ -34,11 +34,17 @@ public sealed class TabletDisplay : IDisposable
         this.address = address;
         this.port = port;
         status = Snapshot(settings);
+        key = Encoding.ASCII.GetBytes(settings.TabletDisplayKey ?? AppSettings.CreateTabletDisplayKey());
     }
 
     public bool IsRunning => Volatile.Read(ref application) is not null;
 
-    public void Update(AppSettings settings) => Volatile.Write(ref status, Snapshot(settings));
+    public void Update(AppSettings settings)
+    {
+        Volatile.Write(ref status, Snapshot(settings));
+        if (settings.TabletDisplayKey is not null)
+            Volatile.Write(ref key, Encoding.ASCII.GetBytes(settings.TabletDisplayKey));
+    }
 
     private static TabletStatus Snapshot(AppSettings settings)
     {
@@ -79,7 +85,6 @@ public sealed class TabletDisplay : IDisposable
             options.Limits.KeepAliveTimeout = TimeSpan.FromSeconds(10);
         });
         var next = builder.Build();
-        key = Encoding.ASCII.GetBytes(Convert.ToHexString(RandomNumberGenerator.GetBytes(32)));
         next.Run(async context =>
         {
             context.Response.Headers.CacheControl = "no-store";
@@ -102,7 +107,7 @@ public sealed class TabletDisplay : IDisposable
             if (context.Request.Path == "/api/status")
             {
                 var supplied = Encoding.ASCII.GetBytes(context.Request.Headers["X-PresencePlus-Display-Key"].ToString());
-                if (!CryptographicOperations.FixedTimeEquals(key, supplied))
+                if (!CryptographicOperations.FixedTimeEquals(Volatile.Read(ref key), supplied))
                 {
                     context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                     return;
@@ -145,7 +150,8 @@ public sealed class TabletDisplay : IDisposable
                 .Where(ip => ip.AddressFamily == AddressFamily.InterNetwork && IsLocalAddress(ip))
                 .Distinct().OrderBy(ip => ip.ToString()).ToArray()
             : [address];
-        return addresses.Select(ip => $"http://{ip}:{listeningPort}/#{Encoding.ASCII.GetString(key)}").ToArray();
+        var currentKey = Encoding.ASCII.GetString(Volatile.Read(ref key));
+        return addresses.Select(ip => $"http://{ip}:{listeningPort}/#{currentKey}").ToArray();
     }
 
     internal static bool IsLocalAddress(IPAddress? address)
@@ -180,7 +186,6 @@ public sealed class TabletDisplay : IDisposable
         if (previous is null) return;
         await previous.DisposeAsync().ConfigureAwait(false);
         application = null;
-        key = [];
     }
 
     public void Dispose() => Task.Run(async () =>

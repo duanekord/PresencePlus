@@ -93,16 +93,34 @@ test("polling updates status, clears stale color on failure, and recovers", asyn
     await page.fireTimer(1000);
     assert.equal(page.elements.status.textContent, "Busy");
     await page.fireTimer(1000);
-    assert.equal(page.elements.status.textContent, "Disconnected");
+    assert.equal(page.elements.status.textContent, "PC unavailable");
     assert.equal(page.document.documentElement.style.backgroundColor, "#202124");
     await page.fireTimer(1000);
     assert.equal(page.elements.status.textContent, "Away");
 });
 
-test("expired viewing key is explained instead of showing the last status", async () => {
+test("a loaded display survives a PC restart without changing its bookmarked key", async () => {
+    const page = await viewer([
+        { name: "Busy", color: "#FF8000" },
+        new Error("PC shut down"),
+        new Error("PC still restarting"),
+        { name: "Busy", color: "#FF8000" }
+    ]);
+    await page.fireTimer(1000);
+    assert.equal(page.elements.status.textContent, "PC unavailable");
+    await page.fireTimer(1000);
+    assert.equal(page.elements.status.textContent, "PC unavailable");
+    await page.fireTimer(1000);
+    assert.equal(page.elements.status.textContent, "Busy");
+    assert.equal(page.requests.length, 4);
+    for (const request of page.requests)
+        assert.equal(request.options.headers["X-PresencePlus-Display-Key"], key);
+});
+
+test("reset viewing key is explained instead of showing the last status", async () => {
     const page = await viewer([() => ({ status: 401, ok: false })]);
-    assert.equal(page.elements.status.textContent, "Link expired");
-    assert.equal(page.document.title, "Duane's Status - Link expired");
+    assert.equal(page.elements.status.textContent, "Link reset");
+    assert.equal(page.document.title, "Duane's Status - Link reset");
 });
 
 test("invalid responses and HTTP errors never look live", async () => {
@@ -111,7 +129,7 @@ test("invalid responses and HTTP errors never look live", async () => {
         () => ({ status: 500, ok: false })
     ]) {
         const page = await viewer([value]);
-        assert.equal(page.elements.status.textContent, "Disconnected");
+        assert.equal(page.elements.status.textContent, "PC unavailable");
     }
 });
 
@@ -124,7 +142,7 @@ test("hung requests time out after four seconds and clear stale status", async (
     ]);
     await page.fireTimer(1000);
     await page.fireTimer(4000);
-    assert.equal(page.elements.status.textContent, "Disconnected");
+    assert.equal(page.elements.status.textContent, "PC unavailable");
 });
 
 test("offline events invalidate pending replies; online events reconnect", async () => {
@@ -136,7 +154,7 @@ test("offline events invalidate pending replies; online events reconnect", async
     page.events.offline();
     finish({ status: 200, ok: true, json: async () => ({ name: "Busy", color: "#FF8000" }) });
     await tick();
-    assert.equal(page.elements.status.textContent, "Disconnected");
+    assert.equal(page.elements.status.textContent, "PC unavailable");
     page.events.online();
     await tick();
     assert.equal(page.elements.status.textContent, "Presenting");

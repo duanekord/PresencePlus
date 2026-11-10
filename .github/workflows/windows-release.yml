@@ -14,6 +14,8 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.package.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -41,10 +43,12 @@ jobs:
         shell: pwsh
         run: node --test .\tests\PresencePlus.Checks\tablet-display.test.mjs
       - name: Create portable package
+        id: package
         shell: pwsh
         run: |
-          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.Substring(1) } else { "0.1.0-ci.$env:GITHUB_RUN_NUMBER" }
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.Substring(1) } else { (Get-Content -LiteralPath .\VERSION -Raw).Trim() }
           .\scripts\Package.ps1 -Version $version
+          "version=$version" >> $env:GITHUB_OUTPUT
       - name: Verify the extracted download
         shell: pwsh
         run: |
@@ -66,9 +70,12 @@ jobs:
             artifacts/packages/*.sha256
           if-no-files-found: error
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs: build
     runs-on: windows-latest
+    concurrency:
+      group: release-${{ needs.build.outputs.version }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -81,9 +88,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
         run: |
-          $releaseArgs = @('release', 'create', $env:GITHUB_REF_NAME, '.\release\*.zip', '.\release\*.sha256',
-            '--verify-tag', '--title', "PresencePlus $env:GITHUB_REF_NAME", '--generate-notes')
-          if ($env:GITHUB_REF_NAME.Contains('-')) { $releaseArgs += '--prerelease' }
+          $tag = "v$env:RELEASE_VERSION"
+          $published = @(& gh api --paginate "repos/$env:GH_REPO/releases" --jq '.[].tag_name')
+          if ($LASTEXITCODE -ne 0) { throw 'Could not check existing GitHub releases.' }
+          if ($published -contains $tag) {
+            Write-Output "Release $tag already exists; leaving its tag and assets unchanged."
+            exit 0
+          }
+          $releaseArgs = @('release', 'create', $tag, '.\release\*.zip', '.\release\*.sha256',
+            '--title', "PresencePlus $tag", '--generate-notes')
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $releaseArgs += '--verify-tag'
+          } else {
+            $refs = & gh api "repos/$env:GH_REPO/git/matching-refs/tags/$tag"
+            if ($LASTEXITCODE -ne 0) { throw 'Could not check the release tag.' }
+            if (($refs | ConvertFrom-Json).ref -contains "refs/tags/$tag") {
+              throw "Tag $tag already exists without a release. Run the tag workflow instead of changing its target."
+            }
+            $releaseArgs += @('--target', $env:GITHUB_SHA)
+          }
+          if ($env:RELEASE_VERSION.Contains('-')) { $releaseArgs += '--prerelease' }
           & gh @releaseArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

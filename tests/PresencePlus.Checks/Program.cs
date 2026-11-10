@@ -91,6 +91,20 @@ try
         Throws<ArgumentException>(() => new AppSettings { BrightnessPercent = value }.Validate(), "invalid brightness rejected");
     new AppSettings().Validate();
     checks++;
+    Equal(false, new AppSettings().TabletDisplayEnabled, "existing settings do not opt into persistent sharing");
+    Throws<ArgumentException>(() => new AppSettings { TabletDisplayEnabled = true }.Validate(), "enabled sharing requires a key");
+    foreach (var key in new[] { "", "ABC", new string('G', 64), new string('a', 64), new string('A', 63), new string('A', 65) })
+        Throws<ArgumentException>(() => new AppSettings { TabletDisplayKey = key }.Validate(), "invalid saved tablet key rejected");
+    var sharingSettings = new AppSettings().WithTabletSharing(true);
+    Equal(64, sharingSettings.TabletDisplayKey?.Length, "enabling creates a persistent random key");
+    Equal(sharingSettings, sharingSettings.WithTabletSharing(true), "repeat enable preserves settings and key");
+    var disabledSharing = sharingSettings.WithTabletSharing(false);
+    Equal(false, disabledSharing.TabletDisplayEnabled, "sharing can be disabled");
+    Equal(sharingSettings.TabletDisplayKey, disabledSharing.TabletDisplayKey, "disable retains bookmarked key");
+    Equal(sharingSettings, disabledSharing.WithTabletSharing(true), "re-enable reuses saved key");
+    var resetSharing = sharingSettings.WithNewTabletDisplayKey();
+    Equal(true, resetSharing.TabletDisplayEnabled, "reset retains sharing preference");
+    Equal(false, sharingSettings.TabletDisplayKey == resetSharing.TabletDisplayKey, "explicit reset generates a new key");
     var palette = new AppSettings().WithStatusColor("Available", "#123abc").WithStatusColor("DoNotDisturb", "#315FFF");
     Equal("#123ABC", palette.ColorFor("Available"), "custom colors normalized");
     Equal("#00FF00", new AppSettings().ColorFor("Available"), "editing colors does not mutate defaults");
@@ -156,6 +170,14 @@ try
         Equal(replaced, store.Load(), "existing settings replaced");
         Throws<ArgumentException>(() => store.Save(saved with { Status = "bad" }), "invalid save rejected");
         Equal(replaced, store.Load(), "invalid save preserves previous settings");
+        store.Save(sharingSettings);
+        Equal(sharingSettings, store.Load(), "sharing preference and key survive settings reload");
+        store.Save(disabledSharing);
+        Equal(disabledSharing, store.Load(), "disabled sharing retains saved key across restart");
+        store.Save(resetSharing);
+        Equal(resetSharing, store.Load(), "reset viewing key survives settings reload");
+        Throws<ArgumentException>(() => store.Save(resetSharing with { TabletDisplayKey = "bad" }), "invalid key cannot overwrite saved link");
+        Equal(resetSharing, store.Load(), "failed reset preserves saved key");
         store.Save(palette);
         Equal("#123ABC", store.Load().ColorFor("Available"), "custom color survives restart");
         Equal("#315FFF", store.Load().ColorFor("DoNotDisturb"), "multiple color overrides survive restart");
@@ -171,6 +193,8 @@ try
         foreach (var json in new[]
         {
             """{"StatusColors":null}""",
+            """{"TabletDisplayEnabled":true}""",
+            """{"TabletDisplayKey":""}""",
             """{"StatusColors":{"Available":null}}""",
             """{"StatusColors":{"Available":"red"}}""",
             """{"StatusColors":{"Unknown":"#112233"}}""",
@@ -295,8 +319,10 @@ try
             using var form = new MainForm(store, uiSettings, led, matter, false, tablet);
             var sharing = (CheckBox)form.Controls.Find("share-tablet", true).Single();
             var tabletLink = (Button)form.Controls.Find("tablet-link", true).Single();
+            var resetTabletLink = (Button)form.Controls.Find("reset-tablet-link", true).Single();
             Equal(false, sharing.Checked, "tablet sharing starts disabled");
             Equal(false, tabletLink.Enabled, "tablet link unavailable until opted in");
+            Equal(false, resetTabletLink.Enabled, "no link to reset before opting in");
             Equal(7, StatusOptions.All.SelectMany(option => form.Controls.Find($"status-{option.Id}", true)).Count(),
                 "window exposes all status buttons");
             Equal(1, form.Controls.Find("pair-light", true).Length, "Matter pairing control available");
@@ -350,6 +376,37 @@ try
                 Thread.Sleep(10);
             }
             Equal(true, sharing.Enabled && tabletLink.Enabled && tablet.IsRunning, "UI enables read-only tablet host");
+            Equal(true, store.Load().TabletDisplayEnabled, "UI persists sharing opt-in");
+            Equal(true, resetTabletLink.Enabled, "explicit link reset control available");
+            var initialLink = new Uri(tablet.GetLinks().Single());
+            Equal(store.Load().TabletDisplayKey, initialLink.Fragment[1..], "UI serves the saved viewing key");
+            void WaitForSharing()
+            {
+                var deadline = DateTime.UtcNow.AddSeconds(10);
+                while (!sharing.Enabled && DateTime.UtcNow < deadline)
+                {
+                    Application.DoEvents();
+                    Thread.Sleep(10);
+                }
+                Equal(true, sharing.Enabled, "sharing operation completes");
+            }
+            sharing.Checked = false;
+            WaitForSharing();
+            Equal(false, tablet.IsRunning || store.Load().TabletDisplayEnabled, "disable stops listener and saves opt-out");
+            Equal(initialLink.Fragment[1..], store.Load().TabletDisplayKey, "disable preserves bookmark");
+            sharing.Checked = true;
+            WaitForSharing();
+            Equal(initialLink.Fragment[1..], new Uri(tablet.GetLinks().Single()).Fragment[1..], "UI re-enable reuses bookmark");
+            form.ResetTabletDisplayLink();
+            var persistentLink = new Uri(tablet.GetLinks().Single());
+            Equal(false, initialLink.Fragment == persistentLink.Fragment, "UI reset changes viewing key");
+            Equal(store.Load().TabletDisplayKey, persistentLink.Fragment[1..], "UI reset saved before serving new key");
+            using (var revoked = new HttpClient())
+            {
+                revoked.DefaultRequestHeaders.Add("X-PresencePlus-Display-Key", initialLink.Fragment[1..]);
+                using var response = revoked.GetAsync(new Uri(persistentLink, "/api/status")).GetAwaiter().GetResult();
+                Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode, "UI reset revokes old bookmark");
+            }
             using (var tabletClient = new HttpClient())
             {
                 var link = new Uri(tablet.GetLinks().Single());
@@ -385,6 +442,47 @@ try
             menu.Items.OfType<ToolStripMenuItem>().Single(item => item.Text == "Exit").PerformClick();
             Equal(true, form.IsDisposed, "tray Exit disposes app");
             Equal(false, tablet.IsRunning, "tray Exit stops tablet listener");
+            var restoredSettings = store.Load();
+            using (var restoredTablet = new TabletDisplay(restoredSettings, System.Net.IPAddress.Loopback, persistentLink.Port))
+            using (var restoredForm = new MainForm(store, restoredSettings, new LedController(matter), matter, false, restoredTablet))
+            {
+                restoredForm.Show();
+                Application.DoEvents();
+                var restoredSharing = (CheckBox)restoredForm.Controls.Find("share-tablet", true).Single();
+                var deadline = DateTime.UtcNow.AddSeconds(10);
+                while (!restoredSharing.Enabled && DateTime.UtcNow < deadline)
+                {
+                    Application.DoEvents();
+                    Thread.Sleep(10);
+                }
+                Equal(true, restoredSharing.Enabled && restoredSharing.Checked && restoredTablet.IsRunning,
+                    "app startup automatically restores saved sharing");
+                Equal(persistentLink.ToString(), restoredTablet.GetLinks().Single(), "startup serves the identical bookmarked URL");
+                using var restoredClient = new HttpClient();
+                restoredClient.DefaultRequestHeaders.Add("X-PresencePlus-Display-Key", persistentLink.Fragment[1..]);
+                using var response = restoredClient.GetAsync(new Uri(persistentLink, "/api/status")).GetAwaiter().GetResult();
+                Equal(System.Net.HttpStatusCode.OK, response.StatusCode, "saved bookmark works after UI restart");
+                restoredSharing.Checked = false;
+                deadline = DateTime.UtcNow.AddSeconds(10);
+                while (!restoredSharing.Enabled && DateTime.UtcNow < deadline)
+                {
+                    Application.DoEvents();
+                    Thread.Sleep(10);
+                }
+                Equal(false, store.Load().TabletDisplayEnabled, "opt-out saved before restart");
+            }
+            var optedOut = store.Load();
+            using (var optedOutTablet = new TabletDisplay(optedOut, System.Net.IPAddress.Loopback, persistentLink.Port))
+            using (var optedOutForm = new MainForm(store, optedOut, new LedController(matter), matter, false, optedOutTablet))
+            {
+                optedOutForm.Show();
+                Application.DoEvents();
+                Equal(false, optedOutTablet.IsRunning, "restart respects saved opt-out");
+                Equal(true, optedOutForm.Controls.Find("reset-tablet-link", true).Single().Enabled,
+                    "saved link can be revoked while sharing is disabled");
+                optedOutForm.ResetTabletDisplayLink();
+                Equal(false, store.Load().TabletDisplayEnabled || optedOutTablet.IsRunning, "reset never opts into sharing");
+            }
         }
         catch (Exception exception) { uiFailure = exception; }
         finally
